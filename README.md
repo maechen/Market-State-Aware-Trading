@@ -19,7 +19,7 @@ module load anaconda3
 ```bash
 # Create conda environment
 conda env create -f environment.yml
-conda activate llm_refusal_env
+conda activate env_name
 
 # Or use pip (if requirements.txt exists)
 pip install -r requirements.txt
