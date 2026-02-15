@@ -1,4 +1,4 @@
-# Market-State-Aware-Trading
+# Market State Aware Trading
 
 Class project for Georgia Tech's CS 4644/7643: Sentiment-Guided Regime-Aware Market Transformer for Alpha Generation
 
