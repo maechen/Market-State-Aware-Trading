@@ -14,6 +14,7 @@ This project generates alpha on SPY by:
 ## Pace Ice Quick Start
 
 ### 0. Load the Anaconda Module
+
 PACE provides Anaconda as a preinstalled module.
 
 ```bash
@@ -21,6 +22,7 @@ module load anaconda3
 ```
 
 > Check available versions with:
+>
 > ```bash
 > module avail anaconda
 > ```
@@ -30,10 +32,22 @@ module load anaconda3
 ```bash
 # Create conda environment
 conda env create -f environment.yml
-conda activate env_name
+conda activate dl-project
+```
 
-# Or use pip (if requirements.txt exists)
-pip install -r requirements.txt
+### 2. Download Data
+
+```bash
+# Download FNSPID dataset
+hf download Zihan1004/FNSPID --repo-type dataset --local-dir data/raw/fnspid
+```
+
+### Troubleshooting
+
+If you're running into disk quota issues:
+```bash
+conda config --add pkgs_dirs /home/hice1/<gt_username>/scratch/conda_pkgs
+rm -rf ~/.conda/pkgs/*
 ```
 
 ## Team

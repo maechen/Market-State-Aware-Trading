@@ -1,0 +1,24 @@
+name: dl-project
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pandas
+  - numpy
+  - scikit-learn
+  - pytorch
+  - pytorch-cuda=11.8
+  - tqdm
+  - matplotlib
+  - seaborn
+  - joblib
+  - pyyaml
+  - pip
+  - pip:
+    - yfinance
+    - hmmlearn
+    - finrl
+    - pyfolio
+    - empyrical
