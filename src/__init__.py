@@ -1,5 +1,5 @@
 """
-Market-State-Aware-Trading source package.
+Market State Aware Trading source package
 """
 
 # re-exporting regime detection API for convenience
