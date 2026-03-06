@@ -79,10 +79,21 @@ NEGATIVE_WORDS = {
 }
 
 TOKEN_PATTERN = re.compile(r"[a-z]+")
+MARKET_TZ = "America/New_York"
+MARKET_OPEN_MINUTE = 9 * 60 + 30
+MARKET_CLOSE_MINUTE = 16 * 60
 
 
 def _tokenize(text: str) -> list[str]:
     return TOKEN_PATTERN.findall(text.lower())
+
+
+def sentiment_score_to_bucket(score: float) -> int:
+    """
+    Map sentiment score in [-1, 1] to an integer bucket in [0, 10].
+    """
+    bucket = int(round((score + 1.0) * 5))
+    return max(0, min(10, bucket))
 
 
 def compute_sentiment_score(text: str) -> float:
@@ -150,6 +161,7 @@ def extract_timestamped_sentiment(input_csv: Path, output_csv: Path) -> pd.DataF
 
     text_for_scoring = (title + " " + article + " " + summary).str.strip()
     sentiment_scores = text_for_scoring.map(compute_sentiment_score)
+    sentiment_score_buckets = sentiment_scores.map(sentiment_score_to_bucket)
 
     result = pd.DataFrame(
         {
@@ -157,6 +169,7 @@ def extract_timestamped_sentiment(input_csv: Path, output_csv: Path) -> pd.DataF
             "date": timestamp.dt.date,
             "stock_symbol": _safe_series(df, symbol_col).replace("", "UNKNOWN"),
             "sentiment_score": sentiment_scores,
+            "sentiment_score_bucket": sentiment_score_buckets,
             "article_title": title,
             "url": _safe_series(df, url_col),
             "publisher": _safe_series(df, publisher_col),
@@ -193,6 +206,12 @@ def main() -> None:
         default=Path("data/processed/fnspid_daily_sentiment.csv"),
         help="Optional daily aggregated sentiment output path.",
     )
+    parser.add_argument(
+        "--daily-news-stats-output",
+        type=Path,
+        default=Path("data/processed/fnspid_daily_news_stats.csv"),
+        help="Path to output per-day histogram counts and market-hours news counts.",
+    )
     args = parser.parse_args()
 
     extracted = extract_timestamped_sentiment(args.input, args.output)
@@ -212,8 +231,50 @@ def main() -> None:
     args.daily_output.parent.mkdir(parents=True, exist_ok=True)
     daily.to_csv(args.daily_output, index=False)
 
+    timestamps_market_tz = extracted["timestamp_utc"].dt.tz_convert(MARKET_TZ)
+    market_minutes = timestamps_market_tz.dt.hour * 60 + timestamps_market_tz.dt.minute
+    is_weekday = timestamps_market_tz.dt.dayofweek < 5
+    is_market_hours = is_weekday & (market_minutes >= MARKET_OPEN_MINUTE) & (market_minutes <= MARKET_CLOSE_MINUTE)
+
+    daily_base = extracted.assign(
+        market_date=timestamps_market_tz.dt.date,
+        is_market_hours=is_market_hours,
+    )
+
+    daily_histogram = (
+        daily_base.groupby(["market_date", "sentiment_score_bucket"], as_index=False)
+        .agg(score_count=("sentiment_score_bucket", "size"))
+        .pivot(index="market_date", columns="sentiment_score_bucket", values="score_count")
+        .reindex(columns=list(range(11)))
+        .fillna(0)
+        .astype(int)
+        .reset_index()
+    )
+    daily_histogram = daily_histogram.rename(columns={i: f"score_{i}_count" for i in range(11)})
+
+    daily_market_counts = daily_base.groupby("market_date", as_index=False).agg(
+        total_news_count=("sentiment_score", "size"),
+        market_hours_news_count=("is_market_hours", "sum"),
+    )
+    daily_market_counts["market_hours_news_count"] = daily_market_counts["market_hours_news_count"].astype(int)
+    daily_market_counts["outside_market_hours_news_count"] = (
+        daily_market_counts["total_news_count"] - daily_market_counts["market_hours_news_count"]
+    )
+
+    daily_news_stats = daily_market_counts.merge(daily_histogram, on="market_date", how="left")
+
+    histogram_columns = [f"score_{i}_count" for i in range(11)]
+    daily_news_stats["sentiment_score_histogram"] = daily_news_stats[histogram_columns].apply(
+        lambda row: ", ".join(f"{i}:{int(row[f'score_{i}_count'])}" for i in range(11) if int(row[f"score_{i}_count"]) > 0),
+        axis=1,
+    )
+
+    args.daily_news_stats_output.parent.mkdir(parents=True, exist_ok=True)
+    daily_news_stats.sort_values("market_date").to_csv(args.daily_news_stats_output, index=False)
+
     print(f"Wrote {len(extracted):,} timestamped rows to: {args.output}")
     print(f"Wrote {len(daily):,} daily rows to: {args.daily_output}")
+    print(f"Wrote {len(daily_news_stats):,} daily news stats rows to: {args.daily_news_stats_output}")
 
 
 if __name__ == "__main__":
