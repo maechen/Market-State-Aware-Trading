@@ -1,6 +1,7 @@
 name: dl-project
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
