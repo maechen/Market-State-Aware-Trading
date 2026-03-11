@@ -8,7 +8,7 @@ There are some values that are null till the 50th day. Specifically, the ma_50. 
 rsi_14 is null till the 14th day. ma_10 is null till the 10th day. ma_20 is null till the 20th day.
 """
 
-def load_data(path: str = "spy_market_data.csv") -> pd.DataFrame:
+def load_data(path: str = "data/spy_market_data.csv") -> pd.DataFrame:
     """Load market data, enforce chronological order, and index by Date."""
     df = pd.read_csv(path, parse_dates=["Date"])
     df = df.sort_values("Date", ascending=True)
@@ -69,32 +69,12 @@ def find_missing_data_points(df: pd.DataFrame, warmup_days: int = 50) -> pd.Data
     
     # 3. Format into a readable DataFrame
     if not missing_points:
-        print(f"✅ No missing values found after index {warmup_days}.")
+        print(f"No missing values found after index {warmup_days}.")
         return pd.DataFrame(columns=["Date", "Column"])
     
     report_df = pd.DataFrame(missing_points, columns=["Date", "Column"])
     
-    print(f"⚠️ Found {len(report_df)} missing data points:")
+    print(f"Found {len(report_df)} missing data points:")
     print(report_df.to_string(index=False))
     
     return report_df
-
-
-if __name__ == "__main__":
-    full_df = load_data()
-    print(f"Date range: {full_df.index.min().date()} to {full_df.index.max().date()}")
-
-    train_df, val_df, test_df = create_walk_forward_split(
-        full_df,
-        train_start="2015-01-01",
-        train_end="2019-12-31",
-        val_start="2020-01-01",
-        val_end="2020-12-31",
-        test_start="2021-01-01",
-        test_end="2021-12-31",
-    )
-    print(find_missing_data_points(full_df))
-
-    print(f"Train shape: {train_df.shape}")
-    print(f"Validation shape: {val_df.shape}")
-    print(f"Test shape: {test_df.shape}")

@@ -28,7 +28,7 @@ def satisfies_persistence(
 
 def select_and_fit_ghmm(
     X: np.ndarray,
-    hidden_states_candidates: tuple[int, ...] = (2, 3, 4),
+    hidden_states: tuple[int, ...] = (2, 3, 4),
     min_self_transition: float = 0.8,
     restarts: int = 5,
     random_state: int | np.random.RandomState | None = None,
@@ -56,16 +56,16 @@ def select_and_fit_ghmm(
     best_n: int = 3
     best_bic: float = np.inf
 
-    for n in hidden_states_candidates:
+    for n in hidden_states:
         # EM can converge to different local optima depending on the starting parameters.
         # trying multiple random initializations to increase the chance of finding a good optimum for each candidate
         for _ in range(restarts):
             seed = rng.integers(0, 2**31)
             ghmm = GaussianHMM(
-                hidden_states=n,
+                n_components=n,
                 covariance_type=covariance_type,
-                max_iter=max_iter,
-                tolerance=tolerance,
+                n_iter=max_iter,
+                tol=tolerance,
                 random_state=seed,
             )
             ghmm.fit(X)
@@ -88,10 +88,10 @@ def select_and_fit_ghmm(
         for _ in range(restarts):
             seed = rng.integers(0, 2**31)
             ghmm = GaussianHMM(
-                hidden_states=3,
+                n_components=3,
                 covariance_type=covariance_type,
-                max_iter=max_iter,
-                tolerance=tolerance,
+                n_iter=max_iter,
+                tol=tolerance,
                 random_state=seed,
             )
             ghmm.fit(X)

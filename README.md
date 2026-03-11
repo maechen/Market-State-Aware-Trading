@@ -11,6 +11,31 @@ This project generates alpha on SPY by:
 3. Training a deep reinforcement learning agent (DQN) in FinRL with discrete delta actions, a downside‑penalized reward, and transaction costs to dynamically adjust position sizes.
 4. Evaluating risk‑adjusted performance via walk‑forward validation, comparing against buy‑and‑hold, momentum, and ablations (no sentiment, no HMM).
 
+## Project Structure
+
+```bash
+Market-State-Aware-Trading/
+├── data/
+│   └── spy_market_data.csv # SPY dataset with OHLCV and features
+├── src/
+│   ├── spy/
+│   │   ├── fetch_spy_data.py # Downloads raw SPY OHLCV from yfinance
+│   │   ├── market_data_utils.py # Loads `spy_market_data.csv`
+│   │   └── __init__.py
+│   ├── regimes/
+│   │   ├── ghmm_selection.py # GHMM model selection using BIC with a persistence filter
+│   │   └── __init__.py
+│   ├── baselines/
+│   │   └── nonregime_baseline.py # Simple buy‑and‑hold and momentum baselines for SPY
+│   └── __init__.py
+├── scripts/
+│   └── label_regimes.py # Multi‑fold walk‑forward GHMM training and labelling on SPY
+├── configs/
+│   └── walkforward_folds.py # Defines the walk‑forward folds.
+├── environment.yml
+└── README.md
+```
+
 ## Pace Ice Quick Start
 
 ### 0. Load the Anaconda Module
@@ -35,11 +60,12 @@ conda env create -f environment.yml
 conda activate dl-project
 ```
 
-### 2. Download Data
+### 2. Train GHMM and Label Regimes
 
 ```bash
-# Download FNSPID dataset
-hf download Zihan1004/FNSPID --repo-type dataset --local-dir data/raw/fnspid
+python scripts/label_regimes.py \
+  --input-path data/spy_market_data.csv \
+  --output-dir data/training/
 ```
 
 ### Troubleshooting

@@ -6,12 +6,9 @@ Outputs regime labels and posteriors.
 BIC and persistence filtering for model selection.
 """
 
-from .ghmm import RegimeGHMM, build_observation_matrix
-from .selection import select_and_fit_ghmm, satisfies_persistence
+from .ghmm_selection import select_and_fit_ghmm, satisfies_persistence
 
 __all__ = [
-    "RegimeGHMM",
-    "build_observation_matrix",
     "select_and_fit_ghmm",
     "satisfies_persistence",
 ]

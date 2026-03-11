@@ -4,7 +4,7 @@ import yfinance as yf
 
 
 START_DATE = "1993-01-01"
-OUTPUT_PATH = "spy_market_data.csv"
+OUTPUT_PATH = "data/spy_market_data.csv"
 FINAL_COLUMNS = [
     "Date",
     "Open",
