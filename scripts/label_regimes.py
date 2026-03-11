@@ -80,14 +80,21 @@ def label_splits(
     if X_train.shape[0] == 0:
         raise ValueError("No valid HMM features in train period after dropping NaNs.")
 
+    # Standardize so the 2x2 full covariance stays well-conditioned (avoids
+    # "covars must be symmetric, positive-definite" / Cholesky errors in EM).
+    train_mean = np.mean(X_train, axis=0)
+    train_std = np.std(X_train, axis=0) + 1e-8
+    X_train_scaled = (X_train - train_mean) / train_std
+
     model, best_n, best_bic = select_and_fit_ghmm(
-        X_train,
+        X_train_scaled,
         hidden_states=(2, 3, 4),
         min_self_transition=0.8,
         restarts=5,
         random_state=42,
         max_iter=1000,
         tolerance=1e-4,
+        min_covar=1e-2,
     )
 
     transmat = model.transmat_
@@ -114,8 +121,9 @@ def label_splits(
             continue
 
         X_split = get_hmm_features(split_df)
-        labels_split = model.predict(X_split)
-        probs_split = model.predict_proba(X_split)
+        X_split_scaled = (X_split - train_mean) / train_std
+        labels_split = model.predict(X_split_scaled)
+        probs_split = model.predict_proba(X_split_scaled)
         labeled_df = _add_regime_columns(
             split_df, labels_split, probs_split, feature_df.index
         )

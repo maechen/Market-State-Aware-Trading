@@ -35,6 +35,7 @@ def select_and_fit_ghmm(
     max_iter: int = 1000,
     tolerance: float = 1e-4,
     covariance_type: str = "full",
+    min_covar: float = 1e-2,
 ) -> tuple[GaussianHMM, int, float]:
     """
     Fit a GHMM using BIC to choose hidden_states and a persistence filter.
@@ -46,6 +47,7 @@ def select_and_fit_ghmm(
     :param max_iter: max EM iterations per fit
     :param tolerance: convergence tolerance for EM
     :param covariance_type: covariance type for GHMM
+    :param min_covar: floor on the diagonal of each state's covariance (avoids non-positive-definite errors)
     :return:
       model: fitted GHMM (best BIC among those passing persistence, or best for 3 states)
       best_n: chosen hidden_states
@@ -64,6 +66,7 @@ def select_and_fit_ghmm(
             ghmm = GaussianHMM(
                 n_components=n,
                 covariance_type=covariance_type,
+                min_covar=min_covar,
                 n_iter=max_iter,
                 tol=tolerance,
                 random_state=seed,
@@ -90,6 +93,7 @@ def select_and_fit_ghmm(
             ghmm = GaussianHMM(
                 n_components=3,
                 covariance_type=covariance_type,
+                min_covar=min_covar,
                 n_iter=max_iter,
                 tol=tolerance,
                 random_state=seed,
