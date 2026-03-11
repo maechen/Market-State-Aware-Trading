@@ -82,7 +82,7 @@ def label_splits(
 
     model, best_n, best_bic = select_and_fit_ghmm(
         X_train,
-        hidden_states_candidates=(2, 3, 4),
+        hidden_states=(2, 3, 4),
         min_self_transition=0.8,
         restarts=5,
         random_state=42,
