@@ -67,6 +67,7 @@ python -m scripts.label_regimes.py
 ```
 
 ### Troubleshooting
+If it's your first time on [Pace Ice](https://discord.com/channels/1466105862912348493/1466115198011052215/1481762866637050041)
 
 If you're running into disk quota issues:
 ```bash
