@@ -63,9 +63,7 @@ conda activate dl-project
 ### 2. Train GHMM and Label Regimes
 
 ```bash
-python scripts/label_regimes.py \
-  --input-path data/spy_market_data.csv \
-  --output-dir data/training/
+python -m scripts.label_regimes.py
 ```
 
 ### Troubleshooting
