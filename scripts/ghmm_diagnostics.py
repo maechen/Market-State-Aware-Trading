@@ -1,14 +1,17 @@
 """
 Produce GHMM diagnostics per fold: state occupancy, emission params, switching
 behavior, BIC gaps across K, stability across folds, transition matrix, and
-per-state summary. Outputs CSVs to a dedicated directory.
+per-state summary. Outputs CSVs and optional figures to a dedicated directory.
 """
 
 import argparse
 import os
 
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 from hmmlearn.hmm import GaussianHMM
 
@@ -110,6 +113,7 @@ def run_diagnostics_for_fold(
     train_std: np.ndarray,
     X_train_scaled: np.ndarray,
     export_transition_matrix: bool,
+    collect_plot_payload: bool = False,
 ) -> tuple[
     list[dict],
     list[dict],
@@ -119,6 +123,7 @@ def run_diagnostics_for_fold(
     list[dict],
     list[dict],
     pd.DataFrame | None,
+    dict | None,
 ]:
     """
     Run all diagnostics for one fold. Returns rows for state_occupancy,
@@ -252,6 +257,26 @@ def run_diagnostics_for_fold(
         for i in range(K)
     ]
 
+    plot_payload: dict | None = None
+    if collect_plot_payload:
+        adj_close = None
+        if "Adj Close" in train_df.columns:
+            adj_close = train_df.loc[valid_idx, "Adj Close"].astype(float).values
+        elif "Close" in train_df.columns:
+            adj_close = train_df.loc[valid_idx, "Close"].astype(float).values
+        plot_payload = {
+            "fold_name": fold_name,
+            "bic_per_k": dict(bic_per_k),
+            "model": model,
+            "z_vit": z_vit,
+            "gamma": gamma,
+            "dates": pd.DatetimeIndex(valid_idx),
+            "X_train": X_train,
+            "K": K,
+            "mean_orig": mean_orig.copy(),
+            "adj_close": adj_close,
+        }
+
     return (
         occupancy_rows,
         emission_rows,
@@ -261,7 +286,186 @@ def run_diagnostics_for_fold(
         duration_hist_rows,
         per_state_rows,
         transmat_df,
+        plot_payload,
     )
+
+
+def _state_colors(K: int) -> list:
+    tab = plt.cm.tab10(np.linspace(0, 1, 10, endpoint=False))
+    return [tuple(tab[i % 10]) for i in range(K)]
+
+
+def save_fold_plots(plot_payload: dict, output_dir: str) -> None:
+    """
+    Save BIC vs K, price/cumulative return with Viterbi shading, posterior heatmap,
+    emission small-multiples (violins + mean scatter), and transition heatmap.
+    """
+    fold_name = plot_payload["fold_name"]
+    bic_per_k: dict[int, float] = plot_payload["bic_per_k"]
+    model = plot_payload["model"]
+    z_vit: np.ndarray = plot_payload["z_vit"]
+    gamma: np.ndarray = plot_payload["gamma"]
+    dates: pd.DatetimeIndex = plot_payload["dates"]
+    X_train: np.ndarray = plot_payload["X_train"]
+    K: int = plot_payload["K"]
+    mean_orig: np.ndarray = plot_payload["mean_orig"]
+    adj_close = plot_payload.get("adj_close")
+
+    plots_dir = os.path.join(output_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    prefix = os.path.join(plots_dir, f"{fold_name}_")
+    colors = _state_colors(K)
+
+    # --- 1) BIC vs K (mark minimum) ---
+    ks = sorted(bic_per_k.keys())
+    bics = [bic_per_k[k] for k in ks]
+    bics_plot = [b if np.isfinite(b) else np.nan for b in bics]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(ks, bics_plot, "o-", color="C0", lw=2, markersize=8)
+    finite = [(k, b) for k, b in zip(ks, bics_plot) if np.isfinite(b)]
+    if finite:
+        k_min, bic_min = min(finite, key=lambda x: x[1])
+        ax.scatter([k_min], [bic_min], s=180, zorder=5, facecolors="none", edgecolors="red", linewidths=2, label=f"min BIC (K={k_min})")
+        ax.annotate(f"K={k_min}", (k_min, bic_min), textcoords="offset points", xytext=(8, 8), fontsize=9)
+        # simple elbow: largest drop in BIC between consecutive K
+        if len(finite) >= 3:
+            drops = []
+            for i in range(len(finite) - 1):
+                drops.append((finite[i][0], finite[i][1] - finite[i + 1][1]))
+            if drops:
+                elbow_k = max(drops, key=lambda x: x[1])[0]
+                ax.axvline(elbow_k, color="gray", ls="--", alpha=0.6, label=f"elbow heuristic (K={elbow_k})")
+        ax.legend(loc="best", fontsize=8)
+    ax.set_xlabel("K (number of states)")
+    ax.set_ylabel("BIC")
+    ax.set_title(f"BIC vs K — {fold_name}")
+    ax.set_xticks(ks)
+    fig.tight_layout()
+    fig.savefig(f"{prefix}bic_vs_k.png", dpi=150)
+    plt.close(fig)
+
+    # --- 1b) Cumulative return (or normalized price) + Viterbi background ---
+    fig, ax = plt.subplots(figsize=(12, 4))
+    x_num = mdates.date2num(pd.to_datetime(dates).to_pydatetime())
+    if adj_close is not None and len(adj_close) == len(z_vit) and np.all(np.isfinite(adj_close)):
+        y_series = adj_close / adj_close[0]
+        y_label = "Normalized Adj Close"
+    else:
+        y_series = np.exp(np.cumsum(X_train[:, 0]))
+        y_label = "exp(cumsum log return)"
+    t = 0
+    while t < len(z_vit):
+        s = int(z_vit[t])
+        u = t
+        while u < len(z_vit) and int(z_vit[u]) == s:
+            u += 1
+        ax.axvspan(x_num[t], x_num[u - 1], color=colors[s % len(colors)], alpha=0.35, zorder=0)
+        t = u
+    ax.plot(dates, y_series, color="black", lw=1.2, zorder=2, label=y_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(f"Decoded states (Viterbi) + {y_label} — {fold_name}")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    fig.autofmt_xdate()
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(f"{prefix}price_decode.png", dpi=150)
+    plt.close(fig)
+
+    # --- 2) Posterior heatmap: time x state ---
+    fig, ax = plt.subplots(figsize=(12, max(2.5, 0.6 * K)))
+    im = ax.imshow(gamma.T, aspect="auto", interpolation="nearest", cmap="viridis", extent=[0, len(dates), -0.5, K - 0.5], origin="lower")
+    ax.set_yticks(range(K))
+    ax.set_yticklabels([f"state {i}" for i in range(K)])
+    ax.set_xlabel("time index (trading days)")
+    ax.set_title(f"Posterior P(z_t = i | x) — {fold_name}")
+    plt.colorbar(im, ax=ax, label="probability")
+    fig.tight_layout()
+    fig.savefig(f"{prefix}posterior_heatmap.png", dpi=150)
+    plt.close(fig)
+
+    # --- 3) Small multiples: violins + scatter (mean return, mean vol) ---
+    fig = plt.figure(figsize=(12, 2.2 * K + 2.5))
+    height_ratios = [1] * K + [1.0]
+    gs = fig.add_gridspec(K + 1, 2, height_ratios=height_ratios)
+    returns_by_state = [X_train[z_vit == i, 0] for i in range(K)]
+    vols_by_state = [X_train[z_vit == i, 1] for i in range(K)]
+    for i in range(K):
+        ax_r = fig.add_subplot(gs[i, 0])
+        ax_v = fig.add_subplot(gs[i, 1])
+        if len(returns_by_state[i]) > 1:
+            sns.violinplot(
+                data=pd.DataFrame({"v": returns_by_state[i]}),
+                y="v",
+                ax=ax_r,
+                color=colors[i],
+                inner="box",
+            )
+        else:
+            ax_r.scatter([0], returns_by_state[i], color=colors[i], zorder=3)
+        ax_r.set_ylabel("log return")
+        ax_r.set_title(f"state {i}: log return (Viterbi days)")
+        if len(vols_by_state[i]) > 1:
+            sns.violinplot(
+                data=pd.DataFrame({"v": vols_by_state[i]}),
+                y="v",
+                ax=ax_v,
+                color=colors[i],
+                inner="box",
+            )
+        else:
+            ax_v.scatter([0], vols_by_state[i], color=colors[i], zorder=3)
+        ax_v.set_ylabel("rolling vol 20")
+        ax_v.set_title(f"state {i}: rolling vol (Viterbi days)")
+    ax_sc = fig.add_subplot(gs[K, :])
+    ax_sc.scatter(
+        mean_orig[:, 0],
+        mean_orig[:, 1],
+        c=list(range(K)),
+        cmap="tab10",
+        s=140,
+        edgecolors="k",
+        zorder=3,
+        vmin=0,
+        vmax=max(K - 1, 1),
+    )
+    for i in range(K):
+        ax_sc.annotate(f" {i}", (mean_orig[i, 0], mean_orig[i, 1]), fontsize=10)
+    ax_sc.set_xlabel("mean log return (model, original scale)")
+    ax_sc.set_ylabel("mean rolling vol (model, original scale)")
+    ax_sc.set_title(f"Emission means (μ) per state — {fold_name}")
+    fig.suptitle(f"Per-state distributions — {fold_name}", y=1.01)
+    fig.tight_layout()
+    fig.savefig(f"{prefix}emissions_multipanel.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- 4) Transition matrix heatmap, diagonal highlighted ---
+    A = model.transmat_
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(A, cmap="Blues", aspect="equal", vmin=0, vmax=max(A.max(), 0.01))
+    for i in range(A.shape[0]):
+        for j in range(A.shape[1]):
+            ax.text(j, i, f"{A[i, j]:.3f}", ha="center", va="center", color="black" if A[i, j] < 0.5 * A.max() else "white", fontsize=10)
+        ax.add_patch(
+            plt.Rectangle(
+                (i - 0.5, i - 0.5),
+                1,
+                1,
+                fill=False,
+                edgecolor="red",
+                lw=3,
+            )
+        )
+    ax.set_xticks(range(A.shape[1]))
+    ax.set_yticks(range(A.shape[0]))
+    ax.set_xticklabels([f"j={j}" for j in range(A.shape[1])])
+    ax.set_yticklabels([f"i={i}" for i in range(A.shape[0])])
+    ax.set_xlabel("to state j")
+    ax.set_ylabel("from state i")
+    ax.set_title(f"Transition matrix (diagonal highlighted) — {fold_name}")
+    plt.colorbar(im, ax=ax, label="P(j|i)")
+    fig.tight_layout()
+    fig.savefig(f"{prefix}transition_heatmap.png", dpi=150)
+    plt.close(fig)
 
 
 def parse_args() -> argparse.Namespace:
@@ -285,6 +489,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Fold number (1-based) for which to export the full KxK transition matrix (e.g. 1 = fold1).",
+    )
+    parser.add_argument(
+        "--plots-fold",
+        type=int,
+        default=1,
+        help="Fold number (1-based) for which to save figures under output_dir/plots/.",
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip generating visualization PNGs.",
     )
     return parser.parse_args()
 
@@ -323,6 +538,7 @@ def main() -> None:
         X_train_scaled = (X_train - train_mean) / train_std
 
         export_trans = (idx + 1) == args.transition_matrix_fold
+        collect_plots = (not args.no_plots) and ((idx + 1) == args.plots_fold)
         (
             occ_rows,
             em_rows,
@@ -332,6 +548,7 @@ def main() -> None:
             dur_rows,
             per_state_rows,
             transmat_df,
+            plot_payload,
         ) = run_diagnostics_for_fold(
             fold_name=fold_name,
             train_df=train_df,
@@ -340,6 +557,7 @@ def main() -> None:
             train_std=train_std,
             X_train_scaled=X_train_scaled,
             export_transition_matrix=export_trans,
+            collect_plot_payload=collect_plots,
         )
 
         all_occupancy.extend(occ_rows)
@@ -354,6 +572,10 @@ def main() -> None:
             path = os.path.join(args.output_dir, f"transition_matrix_{fold_name}.csv")
             transmat_df.to_csv(path)
             print(f"Wrote {path}")
+
+        if plot_payload is not None:
+            save_fold_plots(plot_payload, args.output_dir)
+            print(f"Wrote plots for {fold_name} to {os.path.join(args.output_dir, 'plots')}")
 
     pd.DataFrame(all_occupancy).to_csv(
         os.path.join(args.output_dir, "state_occupancy.csv"), index=False

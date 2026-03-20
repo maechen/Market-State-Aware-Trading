@@ -63,7 +63,7 @@ conda activate dl-project
 ### 2. Train GHMM and Label Regimes
 
 ```bash
-python -m scripts.label_regimes.py
+python -m scripts.label_regimes
 ```
 
 ### Troubleshooting

@@ -76,7 +76,7 @@ FOLDS: list[dict[str, str]] = [
         "val_start": "2019-01-01",
         "val_end": "2019-12-31",
         "test_start": "2020-01-01",
-        "test_end": "2020-12-31",
+        "test_end": "2020-06-11",
     },
 ]
 
