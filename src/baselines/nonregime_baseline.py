@@ -5,8 +5,8 @@ import numpy as np
 
 def baseline_strategy(
     ticker,
-    start_date = "2010-01-01",
-    end_date = "2025-01-01",
+    start_date = "2007-01-01",
+    end_date = "2020-06-11",
     initial_capital = 10000,
     strategy = ('b&h',)):
     """
@@ -104,3 +104,4 @@ if __name__ == "__main__":
     plt.xlabel("Date")
     plt.ylabel("Portfolio Value ($)")
     plt.legend()
+    plt.savefig('spy_portfolio_growth.png')
