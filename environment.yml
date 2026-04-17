@@ -23,3 +23,7 @@ dependencies:
     - finrl
     - pyfolio
     - empyrical
+    - transformers
+    - datasets
+    - accelerate
+    - huggingface_hub

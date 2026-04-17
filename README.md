@@ -27,6 +27,8 @@ Market-State-Aware-Trading/
 │   │   └── __init__.py
 │   ├── baselines/
 │   │   └── nonregime_baseline.py # Simple buy‑and‑hold and momentum baselines for SPY
+│   |── sentiment/
+│   |   └── sent_analysis.py # Extract sentiment score via FinBert
 │   └── __init__.py
 ├── scripts/
 │   └── label_regimes.py # Multi‑fold walk‑forward GHMM training and labelling on SPY
