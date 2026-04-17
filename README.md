@@ -16,6 +16,11 @@ This project generates alpha on SPY by:
 ```bash
 Market-State-Aware-Trading/
 ├── data/
+│   └── baselines
+│   └── ghmm_diagnostics
+│   └── processed
+│   └── spy_only_folds
+│   └── training # Final SPY and sentiment data with walk forward folds
 │   └── spy_market_data.csv # SPY dataset with OHLCV and features
 ├── src/
 │   ├── spy/
@@ -26,12 +31,13 @@ Market-State-Aware-Trading/
 │   │   ├── ghmm_selection.py # GHMM model selection using BIC with a persistence filter
 │   │   └── __init__.py
 │   ├── baselines/
-│   │   └── nonregime_baseline.py # Simple buy‑and‑hold and momentum baselines for SPY
-│   |── sentiment/
-│   |   └── sent_analysis.py # Extract sentiment score via FinBert
-│   └── __init__.py
+│   │   └── nonregime_baseline.py # Simple buy‑and‑hold and momentum baselines for
+│   │   └── rl_only__baseline.py 
 ├── scripts/
+│   └── ghmm_diagnostics.py
 │   └── label_regimes.py # Multi‑fold walk‑forward GHMM training and labelling on SPY
+│   └── run_baselines.py
+│   └── sent_analysis.py # Extract sentiment score via FinBert
 ├── configs/
 │   └── walkforward_folds.py # Defines the walk‑forward folds.
 ├── environment.yml
