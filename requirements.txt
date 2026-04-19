@@ -14,6 +14,7 @@ protobuf==7.34.0
 pycparser==3.0
 python-dateutil==2.9.0.post0
 pytz==2025.2
+pytest==8.3.5
 requests==2.32.5
 six==1.17.0
 soupsieve==2.8.3

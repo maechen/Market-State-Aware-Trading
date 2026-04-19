@@ -152,6 +152,11 @@ class MarketTransformer(nn.Module):
                 elif param_name.endswith("weight") and isinstance(module, nn.Linear):
                     decay.add(full_name)
                 elif param_name.endswith("weight") and isinstance(
+                    module, nn.MultiheadAttention
+                ):
+                    # Fused in_proj_weight / separate q/k/v weights are not on nn.Linear
+                    decay.add(full_name)
+                elif param_name.endswith("weight") and isinstance(
                     module, (nn.LayerNorm, nn.Embedding)
                 ):
                     no_decay.add(full_name)

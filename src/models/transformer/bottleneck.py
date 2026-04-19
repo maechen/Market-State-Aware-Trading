@@ -6,7 +6,7 @@ import torch.nn as nn
 
 class Bottleneck(nn.Module):
     """
-    Linear(d_model, d_z) → Tanh → z
+    Linear(d_model, d_z) -> Tanh -> z
 
     Returns both:
         z     (B, d_z)  — post-Tanh, bounded in (-1, 1), used by all heads
