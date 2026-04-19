@@ -1,12 +1,5 @@
 """
-Core transformer building blocks.
-
-All attention and normalization use PyTorch built-ins (nn.MultiheadAttention,
-nn.LayerNorm) for correctness, hardware acceleration, and consistent
-initialization (Xavier uniform via PyTorch defaults).
-
-Pre-LN (norm_first) convention is followed throughout, matching
-transformer.py's TransformerBlock pattern.
+Causal transformer stack, sinusoidal positional encoding, and temporal readout helpers.
 """
 
 import math
@@ -17,31 +10,23 @@ import torch.nn as nn
 from .config import ReadoutMode
 
 
-# ── Causal mask ───────────────────────────────────────────────────────────────
-
 def make_causal_mask(W: int, device: torch.device) -> torch.Tensor:
     """
-    Returns a (W, W) boolean attn_mask for nn.MultiheadAttention.
-
-    PyTorch convention for bool attn_mask:
-        True  = BLOCKED (position is masked out / set to -inf)
-        False = ATTEND
-
-    The upper triangle (j > i) is True so that position i can only attend
-    to positions 0..i. This makes the last-step hidden state a causal summary
-    of the entire sequence — the reason for using a causal mask here is
-    representational, not leakage prevention (all W days are in the past at
-    inference time).
+    build attention mask so position i attends only to j <= i (lower triangle unmasked)
+    :param W: sequence length (window size)
+    :param device: torch device for the mask tensor
+    :return: tensor of shape (W, W), dtype bool; True means masked (blocked), False means attend
     """
     return torch.triu(torch.ones(W, W, device=device), diagonal=1).bool()
 
 
-# ── Positional Encoding ───────────────────────────────────────────────────────
-
 class PositionalEncoding(nn.Module):
     """
-    Sinusoidal positional encoding (Vaswani et al. 2017).
-    PE buffer pattern from model.py: register_buffer with batch dimension.
+    add fixed sinusoidal PE to token embeddings 
+    dropout after adding
+    :param d_model: model dimension
+    :param dropout: dropout probability after adding PE
+    :param max_len: precomputed PE rows (must be >= any W used)
     """
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 512) -> None:
@@ -55,28 +40,25 @@ class PositionalEncoding(nn.Module):
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, d_model)
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, W, d_model) → (B, W, d_model)"""
+        """
+        add PE to x and apply dropout
+        :param x: tensor (batch, W, d_model)
+        :return: tensor (batch, W, d_model)
+        """
         x = x + self.pe[:, : x.size(1)].requires_grad_(False)
         return self.dropout(x)
 
 
-# ── Transformer Block ─────────────────────────────────────────────────────────
-
 class TransformerBlock(nn.Module):
     """
-    One causal transformer block with Pre-LN residual connections.
-
-    Pre-LN convention (from transformer.py):
-        x = x + Dropout(Attn(LN(x)))
-        x = x + Dropout(FFN(LN(x)))
-
-    Uses:
-        nn.MultiheadAttention — batch_first=True, fused SDPA backend
-        nn.LayerNorm
-        FFN: Linear → GELU → Dropout → Linear → Dropout
+    one causal self-attention block with pre-LayerNorm and GELU FFN (residual connections).
+    :param d_model: hidden size
+    :param n_heads: attention heads
+    :param d_ff: FFN inner dimension
+    :param dropout: dropout for attention and FFN
     """
 
     def __init__(
@@ -113,11 +95,11 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            x           : (B, W, d_model)
-            causal_mask : (W, W) bool tensor — True = blocked
-        Returns:
-            x           : (B, W, d_model)
+        self-attention with causal mask, then position-wise FFN
+        both with residual add
+        :param x: tensor (batch, W, d_model)
+        :param causal_mask: bool tensor (W, W), True where attention is blocked
+        :return: tensor (batch, W, d_model)
         """
         h = self.norm1(x)
         attn_out, _ = self.attn(h, h, h, attn_mask=causal_mask, need_weights=False)
@@ -126,10 +108,15 @@ class TransformerBlock(nn.Module):
         return x
 
 
-# ── Transformer Stack ─────────────────────────────────────────────────────────
-
 class TransformerStack(nn.Module):
-    """N × TransformerBlock followed by a final LayerNorm."""
+    """
+    stack of causal TransformerBlocks followed by final LayerNorm
+    :param d_model: hidden size
+    :param n_heads: attention heads per block
+    :param d_ff: FFN inner size per block
+    :param n_layers: number of blocks
+    :param dropout: dropout probability
+    """
 
     def __init__(
         self,
@@ -146,25 +133,22 @@ class TransformerStack(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
-        """x: (B, W, d_model) → (B, W, d_model)"""
+        """
+        run the stack with the same causal mask at every layer
+        :param x: tensor (batch, W, d_model)
+        :param causal_mask: bool tensor (W, W) for self-attention
+        :return: tensor (batch, W, d_model)
+        """
         for block in self.blocks:
             x = block(x, causal_mask)
         return self.norm(x)
 
 
-# ── Temporal Readout ──────────────────────────────────────────────────────────
-
 class TemporalReadout(nn.Module):
     """
-    Collapses (B, W, d_model) → (B, d_model).
-
-    LAST:      h[:, -1, :]  — default; privileged last position under causal mask
-    MEAN:      h.mean(dim=1)
-    ATTN_POOL: MASTER-style learned temporal attention (TemporalAttention pattern):
-                   proj  = W_q(h)                        (B, W, d_model)
-                   query = proj[:, -1, :].unsqueeze(-1)  (B, d_model, 1)
-                   lam   = softmax(proj @ query, dim=1)  (B, W, 1)
-                   out   = (lam.transpose(1,2) @ h).squeeze(1)
+    pool (batch, W, d_model) down to (batch, d_model) for the bottleneck
+    :param d_model: hidden size (used for ATTN_POOL linear)
+    :param mode: LAST (h[:, -1]), MEAN, or ATTN_POOL (softmax weights over time)
     """
 
     def __init__(self, d_model: int, mode: ReadoutMode = ReadoutMode.LAST) -> None:
@@ -175,14 +159,18 @@ class TemporalReadout(nn.Module):
             nn.init.xavier_uniform_(self.W_q.weight)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        """h: (B, W, d_model) → (B, d_model)"""
+        """
+        apply LAST, MEAN, or ATTN_POOL pooling over the time dimension
+        :param h: tensor (batch, W, d_model)
+        :return: tensor (batch, d_model)
+        """
         if self.mode == ReadoutMode.LAST:
             return h[:, -1, :]
         elif self.mode == ReadoutMode.MEAN:
             return h.mean(dim=1)
-        else:  # ATTN_POOL
-            proj = self.W_q(h)                              # (B, W, d_model)
-            query = proj[:, -1, :].unsqueeze(-1)            # (B, d_model, 1)
-            scores = torch.bmm(proj, query).squeeze(-1)     # (B, W)
-            weights = torch.softmax(scores, dim=1).unsqueeze(1)  # (B, 1, W)
-            return torch.bmm(weights, h).squeeze(1)         # (B, d_model)
+        else:
+            proj = self.W_q(h)
+            query = proj[:, -1, :].unsqueeze(-1)
+            scores = torch.bmm(proj, query).squeeze(-1)
+            weights = torch.softmax(scores, dim=1).unsqueeze(1)
+            return torch.bmm(weights, h).squeeze(1)

@@ -1,20 +1,5 @@
 """
-MarketTransformer — full sentiment-guided transformer with multitask heads.
-
-Pipeline:
-    SentimentGate → FeatureProj → PositionalEncoding → TransformerStack
-    → TemporalReadout → Bottleneck → [DirectionHead, RegimeHead, ReturnHead]
-
-Input:  x of shape (B, W, d_feat + d_sent)
-        columns 0 .. d_feat-1  = price/tech features (gated)
-        columns d_feat .. end  = sentiment features (gate input only)
-
-Output: dict with keys
-        'z'          (B, d_z)        — bounded latent state (Tanh)
-        'z_pre'      (B, d_z)        — unbounded pre-activation
-        'dir_logits' (B, n_dir)      — direction raw logits
-        'reg_logits' (B, n_reg)      — regime raw logits
-        'ret_pred'   (B, 1)          — return regression prediction
+MarketTransformer: sentiment gate, causal transformer, bottleneck, and multitask heads (direction, regime, return).
 """
 
 import torch
@@ -30,11 +15,15 @@ from .heads import DirectionHead, RegimeHead, ReturnHead
 
 
 class MarketTransformer(nn.Module):
+    """
+    end-to-end model from windowed features to latent z and three supervised predictions
+    :param config: TransformerConfig with dimensions, gate mode, readout, and loss weights
+    """
+
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
         self.config = config
 
-        # ── Gate ─────────────────────────────────────────────────────────
         if config.gate_mode == GateMode.MASTER:
             self.gate = SentimentGate(config.d_sent, config.d_feat, config.gate_beta)
             self.feature_proj: Optional[nn.Linear] = nn.Linear(config.d_feat, config.d_model)
@@ -47,71 +36,61 @@ class MarketTransformer(nn.Module):
             )
             self.feature_proj = None
 
-        # ── Transformer core ──────────────────────────────────────────────
         self.pos_enc = PositionalEncoding(config.d_model, config.dropout)
         self.transformer_stack = TransformerStack(
             config.d_model, config.n_heads, config.d_ff, config.n_layers, config.dropout
         )
         self.readout = TemporalReadout(config.d_model, config.readout_mode)
 
-        # ── Bottleneck + heads ────────────────────────────────────────────
         self.bottleneck = Bottleneck(config.d_model, config.d_z)
         self.dir_head = DirectionHead(config.d_z, config.n_dir_classes)
         self.reg_head = RegimeHead(config.d_z, config.n_reg_classes)
         self.ret_head = ReturnHead(config.d_z)
 
-    # ── Forward ───────────────────────────────────────────────────────────
-
     def forward(self, x: torch.Tensor) -> dict:
         """
-        Args:
-            x : (B, W, d_feat + d_sent)
-        Returns:
-            dict of z, z_pre, dir_logits, reg_logits, ret_pred
+        encode a batch of W-day windows into latent z and multitask logits
+        :param x: tensor (batch, W, d_feat + d_sent); first d_feat columns are price/tech, rest sentiment
+        :return:
+          dict with keys z, z_pre, dir_logits, reg_logits, ret_pred (shapes per TransformerConfig)
         """
         B, W, _ = x.shape
-        price_tech = x[..., : self.config.d_feat]   # (B, W, d_feat)
-        sent_last = x[:, -1, self.config.d_feat :]  # (B, d_sent)
+        price_tech = x[..., : self.config.d_feat]
+        sent_last = x[:, -1, self.config.d_feat :]
 
-        gated = self.gate(price_tech, sent_last)     # (B, W, d_feat or d_model)
+        gated = self.gate(price_tech, sent_last)
 
         if self.feature_proj is not None:
-            h = self.feature_proj(gated)             # (B, W, d_model)
+            h = self.feature_proj(gated)
         else:
-            h = gated                                # (B, W, d_model) already
+            h = gated
 
         h = self.pos_enc(h)
 
         causal_mask = make_causal_mask(W, x.device)
-        h = self.transformer_stack(h, causal_mask)   # (B, W, d_model)
+        h = self.transformer_stack(h, causal_mask)
 
-        h_pooled = self.readout(h)                   # (B, d_model)
-        z, z_pre = self.bottleneck(h_pooled)         # (B, d_z), (B, d_z)
+        h_pooled = self.readout(h)
+        z, z_pre = self.bottleneck(h_pooled)
 
         return {
             "z": z,
             "z_pre": z_pre,
-            "dir_logits": self.dir_head(z),          # (B, n_dir)
-            "reg_logits": self.reg_head(z),          # (B, n_reg)
-            "ret_pred": self.ret_head(z),            # (B, 1)
+            "dir_logits": self.dir_head(z),
+            "reg_logits": self.reg_head(z),
+            "ret_pred": self.ret_head(z),
         }
-
-    # ── Loss ──────────────────────────────────────────────────────────────
 
     def compute_loss(
         self, out: dict, targets: dict
     ) -> tuple[torch.Tensor, dict]:
         """
-        Args:
-            out     : dict from forward()
-            targets : dict with keys
-                      'y_dir'       (B,)   int long
-                      'y_reg'       (B,)   int long
-                      'y_ret_std'   (B,)   float
-                      'dir_weights' (n_dir_classes,) optional class weights
-        Returns:
-            total_loss : scalar tensor
-            info       : dict of per-component float losses
+        weighted sum of direction CE, regime CE, and huber return loss.
+        :param out: forward() output dict
+        :param targets: dict with y_dir, y_reg, y_ret_std (batch tensors); optional dir_weights for CE
+        :return:
+          total: scalar loss tensor for backprop
+          info: dict of float component losses (dir_loss, reg_loss, ret_loss, total_loss)
         """
         cfg = self.config
 
@@ -133,13 +112,13 @@ class MarketTransformer(nn.Module):
             "total_loss": total.item(),
         }
 
-    # ── Optimizer ─────────────────────────────────────────────────────────
-
     def configure_optimizers(self, lr: float, weight_decay: float) -> list[dict]:
         """
-        Separates parameters into decay (nn.Linear weights) and no-decay
-        (biases, LayerNorm weights) groups, following the pattern from
-        transformer.py's configure_optimizers.
+        split parameters into AdamW-style decay (linear / MHA weights) vs no-decay (bias, LayerNorm).
+        :param lr: base learning rate (stored in returned dicts only if caller uses it; here unused)
+        :param weight_decay: L2 coefficient for the decay group
+        :return:
+          list of two optimizer param groups: high decay, zero decay
         """
         decay: set[str] = set()
         no_decay: set[str] = set()

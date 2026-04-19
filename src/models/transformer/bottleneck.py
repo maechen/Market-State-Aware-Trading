@@ -1,4 +1,6 @@
-"""Bottleneck projection: d_model → d_z via Linear → Tanh."""
+"""
+Linear bottleneck with Tanh for bounded latent states used by multitask heads and optional RL.
+"""
 
 import torch
 import torch.nn as nn
@@ -6,18 +8,9 @@ import torch.nn as nn
 
 class Bottleneck(nn.Module):
     """
-    Linear(d_model, d_z) -> Tanh -> z
-
-    Returns both:
-        z     (B, d_z)  — post-Tanh, bounded in (-1, 1), used by all heads
-        z_pre (B, d_z)  — pre-Tanh, unbounded, available for the RL stage
-
-    The supervised training loss always operates on z. The RL observation
-    is selected by config.use_pre_tanh_z: if True, the RL agent receives
-    z_pre; otherwise it receives z.
-
-    If z_pre norms collapse near 0 during training, consider widening the
-    bottleneck or switching to LayerNorm → Linear → SiLU as an ablation.
+    map pooled hidden state to a low-dimensional latent via linear then tanh.
+    :param d_model: input dimension (transformer hidden size)
+    :param d_z: output dimension (latent bottleneck size, e.g. 32)
     """
 
     def __init__(self, d_model: int, d_z: int) -> None:
@@ -28,11 +21,12 @@ class Bottleneck(nn.Module):
 
     def forward(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Args:
-            h : (B, d_model) — pooled hidden state from TemporalReadout
-        Returns:
-            z     : (B, d_z) — bounded latent state
-            z_pre : (B, d_z) — unbounded pre-activation
+        apply linear then tanh
+        expose both bounded and pre-activation vectors for heads and RL
+        :param h: pooled hidden state tensor, shape (batch, d_model)
+        :return:
+          z: post-Tanh latent, shape (batch, d_z), in (-1, 1), used by supervised heads
+          z_pre: pre-Tanh linear output, shape (batch, d_z), optional RL observation if use_pre_tanh_z
         """
         z_pre = self.linear(h)
         z = torch.tanh(z_pre)

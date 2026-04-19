@@ -1,4 +1,6 @@
-"""Multi-task prediction heads that operate on the 32D latent state z."""
+"""
+Linear classification and regression heads on the bottleneck latent vector z.
+"""
 
 import torch
 import torch.nn as nn
@@ -6,9 +8,9 @@ import torch.nn as nn
 
 class DirectionHead(nn.Module):
     """
-    3-class next-day direction head: Bear (0) / Neutral (1) / Bull (2).
-    Returns raw logits — CrossEntropyLoss with label_smoothing is applied
-    externally in model.compute_loss().
+    next-day direction logits (bear / neutral / bull)
+    :param d_z: bottleneck dimension
+    :param n_classes: number of direction classes (default 3)
     """
 
     def __init__(self, d_z: int, n_classes: int = 3) -> None:
@@ -18,14 +20,20 @@ class DirectionHead(nn.Module):
         nn.init.zeros_(self.linear.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """z: (B, d_z) → logits: (B, n_classes)"""
+        """
+        map latent z to direction logits
+        :param z: tensor (batch, d_z)
+        :return: logits (batch, n_classes)
+        """
         return self.linear(z)
 
 
 class RegimeHead(nn.Module):
     """
-    HMM regime classification head: states 0–3 (matching GHMM best_n=4).
-    Returns raw logits.
+    HMM regime logits (states 0..K-1)
+    K should match GHMM hidden state count used for labels
+    :param d_z: bottleneck dimension
+    :param n_classes: number of regime classes (default 4 for GHMM with best_n=4)
     """
 
     def __init__(self, d_z: int, n_classes: int = 4) -> None:
@@ -35,15 +43,18 @@ class RegimeHead(nn.Module):
         nn.init.zeros_(self.linear.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """z: (B, d_z) → logits: (B, n_classes)"""
+        """
+        map latent z to regime logits
+        :param z: tensor (batch, d_z)
+        :return: logits (batch, n_classes)
+        """
         return self.linear(z)
 
 
 class ReturnHead(nn.Module):
     """
-    Next-day standardized return regression head.
-    Trained with Huber loss (smooth L1) to be robust to outlier days.
-    Returns a scalar prediction per sample.
+    scalar prediction of standardized next-day log return
+    :param d_z: bottleneck dimension
     """
 
     def __init__(self, d_z: int) -> None:
@@ -53,5 +64,9 @@ class ReturnHead(nn.Module):
         nn.init.zeros_(self.linear.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """z: (B, d_z) → ret_pred: (B, 1)"""
+        """
+        map latent z to one return value per sample
+        :param z: tensor (batch, d_z)
+        :return: predictions (batch, 1)
+        """
         return self.linear(z)
