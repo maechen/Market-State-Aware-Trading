@@ -45,9 +45,12 @@ if str(SRC_ROOT) not in sys.path:
 from configs.walkforward_folds import FOLDS
 from spy.market_data_utils import create_walk_forward_split, load_data
 
-# Raw market columns expected from `spy_market_data.csv`.
+LATENT_DIM = 32
+LATENT_COLUMNS = [f"latent_{i}" for i in range(LATENT_DIM)]
+REGIME_COLUMNS = ["regime_label"]
+
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
-# Technical indicators requested for the RL-only baseline.
+
 INDICATOR_COLUMNS = [
     "rsi_14",
     "macd",
@@ -58,9 +61,7 @@ INDICATOR_COLUMNS = [
     "ma_50",
 ]
 
-# FinRL expects OHLCV as lowercase; `close` is consumed directly by the env
-# while the rest are fed via technical indicator list.
-FINRL_TECH_COLUMNS = [
+STATE_COLUMNS = [
     "open",
     "high",
     "low",
@@ -72,18 +73,6 @@ FINRL_TECH_COLUMNS = [
     "ma_10",
     "ma_20",
     "ma_50",
-]
-
-# === NEW: latent + regime features ===
-LATENT_DIM = 32
-LATENT_COLUMNS = [f"latent_{i}" for i in range(LATENT_DIM)]
-REGIME_COLUMNS = ["regime_label"]
-
-# === FINAL STATE FEATURES (replace FINRL_TECH_COLUMNS) ===
-STATE_COLUMNS = [
-    "open", "high", "low", "volume",
-    "rsi_14", "macd", "macd_signal",
-    "rolling_vol_20", "ma_10", "ma_20", "ma_50",
     *REGIME_COLUMNS,
     *LATENT_COLUMNS,
 ]
@@ -167,56 +156,53 @@ def _resolve_folds(selected_folds: str | None, max_folds: int | None) -> list[di
 
 def prepare_finrl_dataframe(split_df: pd.DataFrame, ticker: str = "SPY") -> pd.DataFrame:
     """
-    Convert split into FinRL format INCLUDING latent + regime features.
+    Convert a split into FinRL stock env format, including regime labels
+    and 32D latent state vectors.
     """
-
     required_columns = [
-        "Open", "High", "Low", "Close", "Volume",
-        "rsi_14", "macd", "macd_signal",
-        "rolling_vol_20", "ma_10", "ma_20", "ma_50",
+        *OHLCV_COLUMNS,
+        *INDICATOR_COLUMNS,
         *REGIME_COLUMNS,
         *LATENT_COLUMNS,
     ]
+    missing_columns = [col for col in required_columns if col not in split_df.columns]
+    if missing_columns:
+        raise KeyError(
+            f"Missing required columns for DRL training: {missing_columns}"
+        )
 
-    missing = [col for col in required_columns if col not in split_df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns: {missing}")
+    reset_df = split_df.reset_index()
+    if "Date" not in reset_df.columns:
+        raise KeyError("Expected `Date` column after reset_index().")
 
-    df = split_df.reset_index()
-
-    if "Date" not in df.columns:
-        raise KeyError("Expected Date column")
-
-    df = df.rename(columns={
-        "Date": "date",
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Volume": "volume",
-    })
-
-    df["tic"] = ticker
+    finrl_df = reset_df.rename(
+        columns={
+            "Date": "date",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
+    finrl_df["tic"] = ticker
 
     selected_columns = ["date", "tic", "close", *STATE_COLUMNS]
+    finrl_df = finrl_df[selected_columns].copy()
 
-    df = df[selected_columns].copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"])
+    finrl_df["date"] = pd.to_datetime(finrl_df["date"], errors="coerce")
+    finrl_df = finrl_df.dropna(subset=["date"])
 
-    # Drop rows with NaNs in features
-    feature_cols = [col for col in selected_columns if col not in ["date", "tic"]]
-    df = df.dropna(subset=feature_cols)
+    feature_subset = [col for col in selected_columns if col not in {"date", "tic"}]
+    finrl_df = finrl_df.dropna(subset=feature_subset)
 
-    if df.empty:
-        raise ValueError("Empty dataframe after cleaning.")
+    if finrl_df.empty:
+        raise ValueError("Split becomes empty after dropping rows with NaN features.")
 
-    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-    df = df.sort_values(["date", "tic"]).reset_index(drop=True)
-    df.index = df["date"].factorize()[0]
-
-    return df
-
+    finrl_df["date"] = finrl_df["date"].dt.strftime("%Y-%m-%d")
+    finrl_df = finrl_df.sort_values(["date", "tic"]).reset_index(drop=True)
+    finrl_df.index = finrl_df["date"].factorize()[0]
+    return finrl_df
 
 def _load_rl_dependencies():
     """
@@ -285,9 +271,10 @@ def _load_rl_dependencies():
     return StockTradingEnv, DQN, gym
 
 
-def _make_env_kwargs(config: RLBaselineConfig) -> dict:
-    stock_dim = 1
+def _make_env_kwargs(config: DRLTrainingConfig) -> dict:
+    """Build FinRL environment kwargs from config."""
 
+    stock_dim = 1
     state_space = 1 + 2 * stock_dim + len(STATE_COLUMNS) * stock_dim
 
     return {
@@ -298,7 +285,7 @@ def _make_env_kwargs(config: RLBaselineConfig) -> dict:
         "sell_cost_pct": [config.transaction_cost_pct] * stock_dim,
         "state_space": state_space,
         "stock_dim": stock_dim,
-        "tech_indicator_list": STATE_COLUMNS,  # ✅ KEY CHANGE
+        "tech_indicator_list": STATE_COLUMNS,
         "action_space": stock_dim,
         "reward_scaling": config.reward_scaling,
     }
@@ -362,7 +349,7 @@ def _step_env(env, action):
     raise RuntimeError(f"Unexpected env.step output length: {len(step_output)}")
 
 
-def train_fold_dqn(train_df: pd.DataFrame, config: RLBaselineConfig):
+def train_fold_dqn(train_df: pd.DataFrame, config: DRLTrainingConfig):
     """Train one DQN model on one fold's train split."""
 
     StockTradingEnv, DQN, gym = _load_rl_dependencies()
@@ -375,25 +362,25 @@ def train_fold_dqn(train_df: pd.DataFrame, config: RLBaselineConfig):
         action_grid=config.action_grid,
     )
 
-    # DQN is appropriate only after wrapping env action space as discrete.
+    dqn_cfg = config.dqn
+
     model = DQN(
         policy="MlpPolicy",
         env=train_env,
-        learning_rate=config.dqn_learning_rate,
-        batch_size=config.dqn_batch_size,
-        buffer_size=config.dqn_buffer_size,
-        learning_starts=config.dqn_learning_starts,
-        train_freq=config.dqn_train_freq,
-        target_update_interval=config.dqn_target_update_interval,
-        exploration_fraction=config.dqn_exploration_fraction,
-        exploration_final_eps=config.dqn_exploration_final_eps,
+        learning_rate=dqn_cfg.learning_rate,
+        batch_size=dqn_cfg.batch_size,
+        buffer_size=dqn_cfg.buffer_size,
+        learning_starts=dqn_cfg.learning_starts,
+        train_freq=dqn_cfg.train_freq,
+        target_update_interval=dqn_cfg.target_update_interval,
+        exploration_fraction=dqn_cfg.exploration_fraction,
+        exploration_final_eps=dqn_cfg.exploration_final_eps,
         seed=config.seed,
         verbose=0,
     )
-    # Train in-place and return the fitted policy for val/test evaluation.
+
     model.learn(total_timesteps=config.train_timesteps, progress_bar=False)
     return model, env_kwargs, StockTradingEnv, gym
-
 
 def _extract_account_value_frame(
     base_env,
@@ -818,8 +805,8 @@ def save_strategy_comparison_plot(comparison_df: pd.DataFrame, output_path: Path
     plt.close(fig)
 
 
-def run_walkforward_rl_only_baseline(
-    config: RLBaselineConfig,
+def run_walkforward_drl_training(
+    config: DRLTrainingConfig,
     selected_folds: str | None = None,
     max_folds: int | None = None,
 ) -> pd.DataFrame:
@@ -1104,8 +1091,8 @@ def main() -> None:
     """CLI entrypoint."""
 
     args = parse_args()
-    # Build immutable run config from CLI values.
-    config = RLBaselineConfig(
+
+    config = DRLTrainingConfig(
         input_path=args.input_path,
         output_dir=args.output_dir,
         ticker=args.ticker,
@@ -1116,14 +1103,15 @@ def main() -> None:
         hmax=args.hmax,
         seed=args.seed,
         action_grid=_parse_action_grid(args.action_grid),
+        dqn=DQNConfig(),
     )
-    # Execute full walk-forward training/evaluation.
-    metrics_df = run_walkforward_rl_only_baseline(
+
+    metrics_df = run_walkforward_drl_training(
         config=config,
         selected_folds=args.folds,
         max_folds=args.max_folds,
     )
-    print("RL-only baseline complete. Metrics:")
+    print("DRL training complete. Metrics:")
     print(metrics_df.to_string(index=False))
 
 
