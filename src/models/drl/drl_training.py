@@ -47,7 +47,7 @@ from spy.market_data_utils import create_walk_forward_split, load_data
 
 LATENT_DIM = 32
 LATENT_COLUMNS = [f"latent_{i}" for i in range(LATENT_DIM)]
-REGIME_COLUMNS = ["regime_label"]
+REGIME_COLUMNS = ["regime_prob_0", "regime_prob_1", "regime_prob_2", "regime_prob_3"]
 
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -59,20 +59,14 @@ INDICATOR_COLUMNS = [
     "ma_10",
     "ma_20",
     "ma_50",
+    "weight",
+    "PnL",
+    "drawdown",
 ]
 
 STATE_COLUMNS = [
-    "open",
-    "high",
-    "low",
-    "volume",
-    "rsi_14",
-    "macd",
-    "macd_signal",
-    "rolling_vol_20",
-    "ma_10",
-    "ma_20",
-    "ma_50",
+    *OHLCV_COLUMNS,
+    *INDICATOR_COLUMNS,
     *REGIME_COLUMNS,
     *LATENT_COLUMNS,
 ]
