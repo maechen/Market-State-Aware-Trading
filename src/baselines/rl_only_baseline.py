@@ -87,11 +87,13 @@ class RLBaselineConfig:
     ticker: str = "SPY"
 
     # Core training/backtest controls.
-    train_timesteps: int = 50_000
+    train_timesteps: int = 200_000
     initial_amount: float = 10000.0
     transaction_cost_pct: float = 1e-3
     reward_scaling: float = 1e-4
     hmax: int = 100
+    downside_penalty_alpha: float = 1.0
+    trade_penalty_beta: float = 1e-3
     seed: int = 42
 
     # Discrete actions are mapped into FinRL's continuous action range [-1, 1].
@@ -104,7 +106,7 @@ class RLBaselineConfig:
     dqn_learning_starts: int = 1_000
     dqn_train_freq: int = 4
     dqn_target_update_interval: int = 500
-    dqn_exploration_fraction: float = 0.1
+    dqn_exploration_fraction: float = 0.4
     dqn_exploration_final_eps: float = 0.02
 
 
@@ -118,7 +120,7 @@ def _parse_action_grid(raw: str) -> tuple[float, ...]:
     # Always keep an explicit hold action.
     if 0.0 not in values:
         raise ValueError("Action grid must include 0.0 (hold action).")
-    # FinRL action semantics are in [-1, 1].
+    # Weight deltas are bounded to [-1, 1] (full sell to full buy).
     if any(value < -1.0 or value > 1.0 for value in values):
         raise ValueError("All action grid values must be in [-1.0, 1.0].")
     return values
@@ -308,33 +310,185 @@ def _build_discrete_env(
     split_df: pd.DataFrame,
     env_kwargs: dict,
     action_grid: tuple[float, ...],
+    downside_penalty_alpha: float = 0.3,
+    trade_penalty_beta: float = 1e-4,
 ):
     """
     Wrap continuous FinRL env with a discrete action interface for DQN.
+
+    Grid values are portfolio-weight deltas in [-1, 1]. The wrapper translates
+    each delta into the equivalent shares-to-trade for FinRL, replaces FinRL's
+    reward with the custom shaped reward, and appends three portfolio diagnostics
+    to the observation: current_weight, step_return (%), fractional_drawdown.
     """
 
     class _DiscreteSingleAssetActionWrapper(gym_module.ActionWrapper):
-        def __init__(self, env, grid: tuple[float, ...]):
+        def __init__(
+            self,
+            env,
+            grid: tuple[float, ...],
+            downside_alpha: float,
+            trade_beta: float,
+        ):
             super().__init__(env)
-            # Map integer action IDs to fixed continuous values in [-1, 1].
             self._grid = np.asarray(grid, dtype=np.float32)
             self.action_space = gym_module.spaces.Discrete(len(self._grid))
-            # Keep history for fold diagnostics / CSV export.
+            self._downside_alpha = float(downside_alpha)
+            self._trade_beta = float(trade_beta)
+            self._previous_account_value = 0.0
+            self._running_peak_account_value = 0.0
+            self.observation_space = self._build_augmented_observation_space()
             self.discrete_action_history: list[int] = []
             self.continuous_action_history: list[float] = []
 
+        def _build_augmented_observation_space(self):
+            base_space = getattr(self.env, "observation_space", None)
+            dtype = np.float32
+            lower_bound = np.finfo(dtype).min
+            upper_bound = np.finfo(dtype).max
+
+            if isinstance(base_space, gym_module.spaces.Box):
+                base_low = np.asarray(base_space.low, dtype=dtype).reshape(-1)
+                base_high = np.asarray(base_space.high, dtype=dtype).reshape(-1)
+            else:
+                if base_space is not None and getattr(base_space, "shape", None):
+                    base_dim = int(np.prod(base_space.shape))
+                else:
+                    base_dim = int(len(np.asarray(getattr(self.env, "state", []), dtype=dtype)))
+                base_low = np.full(base_dim, lower_bound, dtype=dtype)
+                base_high = np.full(base_dim, upper_bound, dtype=dtype)
+
+            # Extra dims: weight ∈ [0,1], step_return ∈ [-1,∞), frac_drawdown ∈ [0,1]
+            extra_low = np.asarray([0.0, -1.0, 0.0], dtype=dtype)
+            extra_high = np.asarray([1.0, upper_bound, 1.0], dtype=dtype)
+            return gym_module.spaces.Box(
+                low=np.concatenate([base_low, extra_low]),
+                high=np.concatenate([base_high, extra_high]),
+                dtype=dtype,
+            )
+
+        def _extract_portfolio_state(self) -> tuple[float, float, float, float]:
+            state = np.asarray(getattr(self.env, "state", []), dtype=float).reshape(-1)
+            if state.size < 3:
+                return 0.0, 0.0, 0.0, 0.0
+            cash = float(state[0]) if np.isfinite(state[0]) else 0.0
+            price = float(state[1]) if np.isfinite(state[1]) else 0.0
+            shares = float(state[2]) if np.isfinite(state[2]) else 0.0
+            account_value = cash + shares * price
+            return cash, price, shares, float(account_value) if np.isfinite(account_value) else 0.0
+
+        def _current_account_value(self) -> float:
+            asset_memory = getattr(self.env, "asset_memory", None)
+            if isinstance(asset_memory, list) and asset_memory:
+                latest = float(asset_memory[-1])
+                if np.isfinite(latest):
+                    return latest
+            _, _, _, account_value = self._extract_portfolio_state()
+            return account_value
+
+        def _current_weight(self) -> float:
+            _, price, shares, account_value = self._extract_portfolio_state()
+            if account_value <= 0.0:
+                return 0.0
+            weight = (shares * price) / account_value
+            return float(np.clip(weight, 0.0, 1.0)) if np.isfinite(weight) else 0.0
+
         def action(self, action):
-            # DQN emits an integer action ID.
+            # DQN emits an integer action ID; grid values are weight deltas.
             idx = int(np.asarray(action).reshape(-1)[0])
             idx = int(np.clip(idx, 0, len(self._grid) - 1))
-            continuous_value = float(self._grid[idx])
+            weight_delta = float(self._grid[idx])
             self.discrete_action_history.append(idx)
-            self.continuous_action_history.append(continuous_value)
-            return np.asarray([continuous_value], dtype=np.float32)
+            self.continuous_action_history.append(weight_delta)
 
-    # Base FinRL env still handles portfolio accounting and reward logic.
+            # Convert weight delta → shares-to-trade for FinRL's action API.
+            _, price, shares, account_value = self._extract_portfolio_state()
+            if account_value <= 0.0 or price <= 0.0:
+                return np.asarray([0.0], dtype=np.float32)
+            current_weight = (shares * price) / account_value
+            target_weight = float(np.clip(current_weight + weight_delta, 0.0, 1.0))
+            target_shares = (target_weight * account_value) / price
+            delta_shares = target_shares - shares
+            hmax = float(getattr(self.env, "hmax", 1))
+            finrl_action = float(np.clip(delta_shares / hmax, -1.0, 1.0))
+            return np.asarray([finrl_action], dtype=np.float32)
+
+        def _trade_executed(self) -> bool:
+            # Based solely on what the env actually transacted; never the intended action.
+            actions_memory = getattr(self.env, "actions_memory", None)
+            if isinstance(actions_memory, list) and actions_memory:
+                latest_trade = np.asarray(actions_memory[-1]).reshape(-1)
+                if latest_trade.size:
+                    return bool(np.any(np.abs(latest_trade) > 1e-12))
+            return False
+
+        def _augment_observation(self, observation, step_return: float, drawdown_frac: float):
+            obs_array = np.asarray(observation, dtype=np.float32).reshape(-1)
+            extra = np.asarray(
+                [self._current_weight(), step_return, max(0.0, drawdown_frac)],
+                dtype=np.float32,
+            )
+            return np.concatenate([obs_array, extra]).astype(np.float32, copy=False)
+
+        def reset(self, **kwargs):
+            reset_output = self.env.reset(**kwargs)
+            self.discrete_action_history.clear()
+            self.continuous_action_history.clear()
+            current_account_value = self._current_account_value()
+            if current_account_value <= 0.0:
+                current_account_value = float(getattr(self.env, "initial_amount", 0.0))
+            self._previous_account_value = current_account_value
+            self._running_peak_account_value = current_account_value
+            if isinstance(reset_output, tuple):
+                obs, info = reset_output
+                return self._augment_observation(obs, step_return=0.0, drawdown_frac=0.0), info
+            return self._augment_observation(reset_output, step_return=0.0, drawdown_frac=0.0)
+
+        def step(self, action):
+            previous_account_value = float(self._previous_account_value)
+            step_output = super().step(action)
+            current_account_value = self._current_account_value()
+            if not np.isfinite(current_account_value):
+                current_account_value = previous_account_value
+
+            step_return = (
+                current_account_value / previous_account_value - 1.0
+                if previous_account_value > 0.0
+                else 0.0
+            )
+            downside_penalty = self._downside_alpha * max(0.0, -step_return) ** 2
+            custom_reward = step_return - downside_penalty
+            if self._trade_executed():
+                custom_reward -= self._trade_beta
+
+            self._running_peak_account_value = max(
+                self._running_peak_account_value, current_account_value
+            )
+            drawdown_frac = (
+                (self._running_peak_account_value - current_account_value)
+                / self._running_peak_account_value
+                if self._running_peak_account_value > 0.0
+                else 0.0
+            )
+            self._previous_account_value = current_account_value
+
+            if len(step_output) == 5:
+                obs, _reward, terminated, truncated, info = step_output
+                aug_obs = self._augment_observation(obs, step_return=step_return, drawdown_frac=drawdown_frac)
+                return aug_obs, float(custom_reward), terminated, truncated, info
+            if len(step_output) == 4:
+                obs, _reward, done, info = step_output
+                aug_obs = self._augment_observation(obs, step_return=step_return, drawdown_frac=drawdown_frac)
+                return aug_obs, float(custom_reward), done, info
+            raise RuntimeError(f"Unexpected env.step output length: {len(step_output)}")
+
     base_env = stock_trading_env_cls(df=split_df, **env_kwargs)
-    wrapped_env = _DiscreteSingleAssetActionWrapper(base_env, action_grid)
+    wrapped_env = _DiscreteSingleAssetActionWrapper(
+        base_env,
+        action_grid,
+        downside_alpha=downside_penalty_alpha,
+        trade_beta=trade_penalty_beta,
+    )
     return wrapped_env, base_env
 
 
@@ -372,6 +526,8 @@ def train_fold_dqn(train_df: pd.DataFrame, config: RLBaselineConfig):
         split_df=train_df,
         env_kwargs=env_kwargs,
         action_grid=config.action_grid,
+        downside_penalty_alpha=config.downside_penalty_alpha,
+        trade_penalty_beta=config.trade_penalty_beta,
     )
 
     # DQN is appropriate only after wrapping env action space as discrete.
@@ -439,6 +595,8 @@ def evaluate_dqn_on_split(
     gym_module,
     action_grid: tuple[float, ...],
     initial_amount: float,
+    downside_penalty_alpha: float = 1.0,
+    trade_penalty_beta: float = 1e-3,
     initial: bool = True,
     previous_state: list[float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[float]]:
@@ -459,6 +617,8 @@ def evaluate_dqn_on_split(
         split_df=split_df,
         env_kwargs=runtime_env_kwargs,
         action_grid=action_grid,
+        downside_penalty_alpha=downside_penalty_alpha,
+        trade_penalty_beta=trade_penalty_beta,
     )
 
     # Deterministic policy for reproducible validation/test evaluation.
@@ -539,13 +699,44 @@ def evaluate_dqn_on_split(
     if (not initial) and previous_state is not None and len(previous_state) >= 3:
         initial_shares = float(previous_state[2])
 
-    aligned_len = min(len(action_dates), len(executed_shares), len(trade_prices))
+    account_values = (
+        pd.to_numeric(account_value_df["account_value"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+        .reset_index(drop=True)
+    )
+    action_account_values = account_values.iloc[1 : 1 + len(actions)].reset_index(drop=True)
+    previous_account_values = account_values.iloc[: len(actions)].reset_index(drop=True)
+
+    aligned_len = min(
+        len(action_dates),
+        len(executed_shares),
+        len(trade_prices),
+        len(action_account_values),
+        len(previous_account_values),
+    )
     action_dates = action_dates.iloc[:aligned_len].reset_index(drop=True)
     discrete_actions = actions[:aligned_len]
     continuous_actions = action_values[:aligned_len]
     executed_shares = executed_shares[:aligned_len]
     trade_prices = trade_prices.iloc[:aligned_len].reset_index(drop=True)
+    action_account_values = action_account_values.iloc[:aligned_len].reset_index(drop=True)
+    previous_account_values = previous_account_values.iloc[:aligned_len].reset_index(drop=True)
+
     position_after_trade = (np.cumsum(executed_shares) + initial_shares).tolist()
+    step_pnl = (
+        action_account_values.to_numpy(dtype=float)
+        - previous_account_values.to_numpy(dtype=float)
+    )
+    position_market_value = np.asarray(position_after_trade, dtype=float) * trade_prices.to_numpy(dtype=float)
+    account_value_arr = action_account_values.to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        weight = np.where(account_value_arr > 0.0, position_market_value / account_value_arr, 0.0)
+    weight = np.nan_to_num(weight, nan=0.0, posinf=0.0, neginf=0.0)
+    weight = np.clip(weight, 0.0, 1.0)
+    running_peak = np.maximum.accumulate(account_value_arr)
+    drawdown = running_peak - account_value_arr
+
     actions_df = pd.DataFrame(
         {
             "date": action_dates,
@@ -555,6 +746,9 @@ def evaluate_dqn_on_split(
             "trade_price": trade_prices,
             "trade_notional": np.abs(np.asarray(executed_shares)) * trade_prices.to_numpy(),
             "position_after_trade": position_after_trade,
+            "weight": weight,
+            "pnl": step_pnl,
+            "drawdown": drawdown,
         }
     )
     terminal_state = list(getattr(base_env, "state", []))
@@ -817,6 +1011,74 @@ def save_strategy_comparison_plot(comparison_df: pd.DataFrame, output_path: Path
     plt.close(fig)
 
 
+def save_per_fold_comparison_plot(per_fold_comparison_df: pd.DataFrame, output_path: Path) -> None:
+    """
+    Save a grid of subplots comparing RL-DQN, Buy-and-Hold, and Momentum on each
+    fold's test period independently — all three strategies start at the same initial
+    capital on the same first test day, making fold-level performance directly comparable.
+    """
+
+    if per_fold_comparison_df.empty:
+        raise ValueError("Cannot plot per-fold comparison from an empty DataFrame.")
+
+    import math
+    import matplotlib.pyplot as plt
+
+    plot_df = per_fold_comparison_df.copy()
+    plot_df["date"] = pd.to_datetime(plot_df["date"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["date", "account_value", "strategy", "fold"]).sort_values(
+        ["fold", "strategy", "date"]
+    )
+    if plot_df.empty:
+        raise ValueError("No valid rows to plot in per-fold comparison.")
+
+    folds = sorted(plot_df["fold"].unique())
+    n_folds = len(folds)
+    ncols = min(n_folds, 4)
+    nrows = math.ceil(n_folds / ncols)
+
+    strategy_styles: dict[str, dict] = {
+        "rl_dqn": {"color": "tab:blue", "label": "RL-DQN"},
+        "buy_hold": {"color": "tab:green", "label": "Buy & Hold"},
+        "momentum_126": {"color": "tab:orange", "label": "Momentum (126d)"},
+    }
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
+
+    for idx, fold_name in enumerate(folds):
+        row, col = divmod(idx, ncols)
+        ax = axes[row][col]
+        fold_df = plot_df[plot_df["fold"] == fold_name]
+        for strategy_name, strategy_df in fold_df.groupby("strategy"):
+            style = strategy_styles.get(strategy_name, {"color": None, "label": strategy_name})
+            ax.plot(
+                strategy_df["date"],
+                strategy_df["account_value"],
+                linewidth=1.5,
+                color=style["color"],
+                label=style["label"],
+            )
+        ax.set_title(fold_name, fontsize=10)
+        ax.set_ylabel("Portfolio Value ($)", fontsize=8)
+        ax.legend(loc="best", fontsize=7)
+        ax.tick_params(labelsize=7)
+        ax.grid(alpha=0.2, linestyle=":")
+        for tick in ax.get_xticklabels():
+            tick.set_rotation(30)
+
+    for idx in range(n_folds, nrows * ncols):
+        row, col = divmod(idx, ncols)
+        axes[row][col].set_visible(False)
+
+    fig.suptitle(
+        "Per-Fold Test Period: RL-DQN vs Buy & Hold vs Momentum (each fold starts at $10k)",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def run_walkforward_rl_only_baseline(
     config: RLBaselineConfig,
     selected_folds: str | None = None,
@@ -842,6 +1104,8 @@ def run_walkforward_rl_only_baseline(
     stitched_test_curves: list[pd.DataFrame] = []
     stitched_test_actions: list[pd.DataFrame] = []
     stitched_previous_state: list[float] | None = None
+    per_fold_comparisons: list[pd.DataFrame] = []
+    per_fold_test_actions: dict[str, pd.DataFrame] = {}
     for fold in folds:
         print(
             f"Running {fold['name']}: "
@@ -876,6 +1140,7 @@ def run_walkforward_rl_only_baseline(
         fold_dir.mkdir(parents=True, exist_ok=True)
 
         # Evaluate only on val/test (train is used solely for fitting policy).
+        fold_test_account_df: pd.DataFrame | None = None
         split_map = {"val": val_finrl, "test": test_finrl}
         for split_name, split_df in split_map.items():
             account_df, actions_df, _ = evaluate_dqn_on_split(
@@ -886,6 +1151,8 @@ def run_walkforward_rl_only_baseline(
                 gym_module=gym_module,
                 action_grid=config.action_grid,
                 initial_amount=config.initial_amount,
+                downside_penalty_alpha=config.downside_penalty_alpha,
+                trade_penalty_beta=config.trade_penalty_beta,
             )
             metrics = compute_performance_metrics(account_df, actions_df=actions_df)
 
@@ -910,6 +1177,23 @@ def run_walkforward_rl_only_baseline(
                     **metrics,
                 }
             )
+            if split_name == "test":
+                fold_test_account_df = account_df
+                per_fold_test_actions[fold["name"]] = actions_df
+
+        # Per-fold fair comparison: RL independent test vs B&H vs Momentum (all fresh $10k).
+        if fold_test_account_df is not None:
+            fold_test_dates = pd.to_datetime(fold_test_account_df["date"], errors="coerce").dropna()
+            fold_classic_df = build_stitched_classic_baselines(
+                full_df=full_df,
+                stitched_dates=fold_test_dates,
+                initial_amount=config.initial_amount,
+                momentum_lookback=126,
+            )
+            fold_rl_curve = fold_test_account_df[["date", "account_value"]].assign(strategy="rl_dqn")
+            fold_comparison = pd.concat([fold_rl_curve, fold_classic_df], ignore_index=True)
+            fold_comparison["fold"] = fold["name"]
+            per_fold_comparisons.append(fold_comparison)
 
         # Stitched out-of-sample test: carry terminal cash/shares across folds.
         stitched_account_df, stitched_actions_df, stitched_previous_state = evaluate_dqn_on_split(
@@ -920,6 +1204,8 @@ def run_walkforward_rl_only_baseline(
             gym_module=gym_module,
             action_grid=config.action_grid,
             initial_amount=config.initial_amount,
+            downside_penalty_alpha=config.downside_penalty_alpha,
+            trade_penalty_beta=config.trade_penalty_beta,
             initial=stitched_previous_state is None,
             previous_state=stitched_previous_state,
         )
@@ -940,9 +1226,38 @@ def run_walkforward_rl_only_baseline(
                     "trade_price",
                     "trade_notional",
                     "position_after_trade",
+                    "weight",
+                    "pnl",
+                    "drawdown",
                     "fold",
                 ]
             ]
+        )
+
+    # Per-fold fair comparison: RL vs B&H vs Momentum, each fold starting fresh at $10k.
+    if per_fold_comparisons:
+        per_fold_df = pd.concat(per_fold_comparisons, ignore_index=True)
+        per_fold_df["date"] = pd.to_datetime(per_fold_df["date"], errors="coerce")
+        per_fold_df = (
+            per_fold_df.dropna(subset=["date", "account_value", "strategy"])
+            .sort_values(["fold", "strategy", "date"])
+            .reset_index(drop=True)
+        )
+        per_fold_df.to_csv(output_root / "rl_only_per_fold_test_comparison.csv", index=False)
+        save_per_fold_comparison_plot(
+            per_fold_comparison_df=per_fold_df,
+            output_path=output_root / "rl_only_per_fold_test_comparison.png",
+        )
+        per_fold_metrics_rows: list[dict[str, float | str]] = []
+        for (fold_name, strategy_name), strat_df in per_fold_df.groupby(["fold", "strategy"]):
+            strat_actions_df = per_fold_test_actions.get(fold_name) if strategy_name == "rl_dqn" else None
+            strat_metrics = compute_performance_metrics(
+                strat_df[["date", "account_value"]].sort_values("date").reset_index(drop=True),
+                actions_df=strat_actions_df,
+            )
+            per_fold_metrics_rows.append({"fold": fold_name, "strategy": strategy_name, **strat_metrics})
+        pd.DataFrame(per_fold_metrics_rows).to_csv(
+            output_root / "rl_only_per_fold_test_metrics.csv", index=False
         )
 
     # Aggregate all fold/split metrics into one summary table.
@@ -1067,7 +1382,19 @@ def parse_args() -> argparse.Namespace:
         "--hmax",
         type=int,
         default=100,
-        help="Maximum shares traded when continuous action magnitude is 1.0.",
+        help="Maximum shares FinRL can trade when the computed delta fills the full hmax budget.",
+    )
+    parser.add_argument(
+        "--downside-penalty-alpha",
+        type=float,
+        default=1.0,
+        help="Alpha in reward: R_t - alpha * max(0, -R_t)^2.",
+    )
+    parser.add_argument(
+        "--trade-penalty-beta",
+        type=float,
+        default=1e-3,
+        help="Beta penalty subtracted when any trade is executed (Δw ≠ 0).",
     )
     parser.add_argument(
         "--seed",
@@ -1092,8 +1419,8 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="-1.0,-0.5,0.0,0.5,1.0",
         help=(
-            "Comma-separated discrete action grid in [-1, 1] mapped to FinRL "
-            "continuous actions (must include 0)."
+            "Comma-separated portfolio-weight deltas in [-1, 1] (must include 0 for hold). "
+            "Each value is converted to the equivalent shares-to-trade at step time."
         ),
     )
     return parser.parse_args()
@@ -1113,6 +1440,8 @@ def main() -> None:
         transaction_cost_pct=args.transaction_cost_pct,
         reward_scaling=args.reward_scaling,
         hmax=args.hmax,
+        downside_penalty_alpha=args.downside_penalty_alpha,
+        trade_penalty_beta=args.trade_penalty_beta,
         seed=args.seed,
         action_grid=_parse_action_grid(args.action_grid),
     )
