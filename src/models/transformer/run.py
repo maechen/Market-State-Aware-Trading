@@ -145,6 +145,7 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         dir_label_smoothing=args.dir_label_smoothing,
         dir_q_low=args.dir_q_low,
         dir_q_high=args.dir_q_high,
+        dir_head_hidden=args.dir_head_hidden,
     )
 
 
@@ -180,6 +181,7 @@ def _run_epoch(
     d_feat: int,
     optimizer: torch.optim.Optimizer | None = None,
     max_batches: int | None = None,
+    dir_class_weights: torch.Tensor | None = None,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -200,11 +202,26 @@ def _run_epoch(
 
         x = x.to(device, non_blocking=True)
         x = _apply_variant_to_inputs(x, variant=variant, d_feat=d_feat)
-        targets = {
+        if not torch.isfinite(x).all():
+            raise ValueError(
+                f"Non-finite values detected in input batch at index {batch_idx}."
+            )
+        y_ret_f32 = y_ret.to(dtype=torch.float32)
+        if not torch.isfinite(y_ret_f32).all():
+            n_bad = int((~torch.isfinite(y_ret_f32)).sum())
+            print(
+                f"[Warning] {n_bad} non-finite return target(s) in batch {batch_idx}; "
+                "clamping to 0.",
+                flush=True,
+            )
+            y_ret_f32 = torch.nan_to_num(y_ret_f32, nan=0.0, posinf=0.0, neginf=0.0)
+        targets: dict[str, Any] = {
             "y_dir": y_dir.to(device=device, dtype=torch.long, non_blocking=True),
             "y_reg": y_reg.to(device=device, dtype=torch.long, non_blocking=True),
-            "y_ret_std": y_ret.to(device=device, dtype=torch.float32, non_blocking=True),
+            "y_ret_std": y_ret_f32.to(device=device, non_blocking=True),
         }
+        if dir_class_weights is not None:
+            targets["dir_weights"] = dir_class_weights
 
         if is_train:
             optimizer.zero_grad(set_to_none=True)
@@ -212,6 +229,10 @@ def _run_epoch(
         with torch.set_grad_enabled(is_train):
             out = model(x)
             loss, info = model.compute_loss(out, targets)
+            if not torch.isfinite(loss):
+                raise ValueError(
+                    f"Non-finite loss encountered at batch {batch_idx}."
+                )
             if is_train:
                 loss.backward()
                 optimizer.step()
@@ -418,7 +439,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.variant == "no_gating" and args.gate_mode != GateMode.MASTER.value:
         print(
             "[Info] no_gating selected; overriding gate_mode to 'master' "
-            "for identity-gate emulation."
+            "for identity-gate emulation.",
+            flush=True,
         )
 
 
@@ -463,7 +485,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         if not fold_dir.exists():
             raise FileNotFoundError(f"Fold directory not found: {fold_dir}")
 
-        print(f"\n=== Running {fold_name} ({args.variant}) ===")
+        print(f"\n=== Running {fold_name} ({args.variant}) ===", flush=True)
         train_loader, val_loader, test_loader = get_fold_loaders(
             fold_dir=str(fold_dir),
             window_size=config.window_size,
@@ -486,6 +508,19 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             model.configure_optimizers(lr=args.lr, weight_decay=args.weight_decay),
             lr=args.lr,
         )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=1e-6
+        )
+
+        # Compute per-class weights for the direction CE loss from training labels.
+        # Inverse-frequency weighting compensates for the 40/20/40 (or 33/33/33)
+        # imbalance; weights are normalised so their mean equals 1.0.
+        train_dir_labels = torch.from_numpy(
+            train_loader.dataset.dir_labels.astype("int64")
+        )
+        dir_counts = torch.bincount(train_dir_labels, minlength=config.n_dir_classes).float()
+        dir_class_weights = (1.0 / dir_counts.clamp(min=1.0))
+        dir_class_weights = (dir_class_weights / dir_class_weights.mean()).to(device)
 
         fold_output = output_root / fold_name
         fold_output.mkdir(parents=True, exist_ok=True)
@@ -504,6 +539,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 d_feat=config.d_feat,
                 optimizer=optimizer,
                 max_batches=args.max_train_batches,
+                dir_class_weights=dir_class_weights,
             )
             val_metrics = _run_epoch(
                 model=model,
@@ -515,12 +551,19 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 max_batches=args.max_eval_batches,
             )
 
+            scheduler.step()
+
             print(
                 f"Epoch {epoch:03d} | "
-                f"train_loss={train_metrics['total_loss']:.6f} "
-                f"val_loss={val_metrics['total_loss']:.6f} "
-                f"train_dir_acc={train_metrics['dir_acc']:.4f} "
-                f"val_dir_acc={val_metrics['dir_acc']:.4f}"
+                f"train={train_metrics['total_loss']:.4f} "
+                f"(dir={train_metrics['dir_loss']:.4f} acc={train_metrics['dir_acc']:.3f} "
+                f"reg={train_metrics['reg_loss']:.4f} acc={train_metrics['reg_acc']:.3f} "
+                f"ret={train_metrics['ret_loss']:.4f}) | "
+                f"val={val_metrics['total_loss']:.4f} "
+                f"(dir={val_metrics['dir_loss']:.4f} acc={val_metrics['dir_acc']:.3f} "
+                f"reg={val_metrics['reg_loss']:.4f}) "
+                f"lr={scheduler.get_last_lr()[0]:.2e}",
+                flush=True,
             )
 
             epoch_rows.append(
@@ -679,7 +722,7 @@ def parse_args(
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs per fold.")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
-    parser.add_argument("--lr", type=float, default=1e-3, help="AdamW learning rate.")
+    parser.add_argument("--lr", type=float, default=3e-4, help="AdamW learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
@@ -711,17 +754,17 @@ def parse_args(
     parser.add_argument("--window-size", type=int, default=20)
     parser.add_argument("--d-feat", type=int, default=7)
     parser.add_argument("--d-sent", type=int, default=3)
-    parser.add_argument("--d-model", type=int, default=128)
-    parser.add_argument("--d-ff", type=int, default=512)
-    parser.add_argument("--d-z", type=int, default=32)
-    parser.add_argument("--n-layers", type=int, default=4)
+    parser.add_argument("--d-model", type=int, default=64)
+    parser.add_argument("--d-ff", type=int, default=128)
+    parser.add_argument("--d-z", type=int, default=16)
+    parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--gate-beta", type=float, default=1.0)
     parser.add_argument(
         "--gate-mode",
         choices=[mode.value for mode in GateMode],
-        default=GateMode.MASTER.value,
+        default=GateMode.CROSS_ATTN.value,
     )
     parser.add_argument(
         "--readout-mode",
@@ -735,12 +778,18 @@ def parse_args(
     )
     parser.add_argument("--n-dir-classes", type=int, default=3)
     parser.add_argument("--n-reg-classes", type=int, default=4)
-    parser.add_argument("--lambda-dir", type=float, default=1.0)
-    parser.add_argument("--lambda-reg", type=float, default=0.5)
-    parser.add_argument("--lambda-ret", type=float, default=0.5)
-    parser.add_argument("--dir-label-smoothing", type=float, default=0.1)
-    parser.add_argument("--dir-q-low", type=float, default=0.40)
-    parser.add_argument("--dir-q-high", type=float, default=0.60)
+    parser.add_argument("--lambda-dir", type=float, default=0.5)
+    parser.add_argument("--lambda-reg", type=float, default=1.0)
+    parser.add_argument("--lambda-ret", type=float, default=0.3)
+    parser.add_argument("--dir-label-smoothing", type=float, default=0.0)
+    parser.add_argument("--dir-q-low", type=float, default=0.33)
+    parser.add_argument("--dir-q-high", type=float, default=0.67)
+    parser.add_argument(
+        "--dir-head-hidden",
+        type=int,
+        default=32,
+        help="Hidden dim for two-layer direction MLP head; 0 = single linear.",
+    )
 
     return parser.parse_args(argv)
 

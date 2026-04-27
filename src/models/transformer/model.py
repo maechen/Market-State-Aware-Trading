@@ -43,7 +43,9 @@ class MarketTransformer(nn.Module):
         self.readout = TemporalReadout(config.d_model, config.readout_mode)
 
         self.bottleneck = Bottleneck(config.d_model, config.d_z)
-        self.dir_head = DirectionHead(config.d_z, config.n_dir_classes)
+        self.dir_head = DirectionHead(
+            config.d_z, config.n_dir_classes, hidden=config.dir_head_hidden
+        )
         self.reg_head = RegimeHead(config.d_z, config.n_reg_classes)
         self.ret_head = ReturnHead(config.d_z)
 

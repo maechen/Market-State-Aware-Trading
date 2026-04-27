@@ -36,8 +36,8 @@ class TransformerConfig:
     :param d_sent: number of sentiment channels per timestep (gate input)
     :param window_size: lookback window length W in days
     :param d_model: transformer embedding dimension
-    :param d_ff: feedforward hidden size (typically 4 * d_model)
-    :param d_z: bottleneck latent dimension (e.g. 32 for RL state)
+    :param d_ff: feedforward hidden size (typically 2–4 × d_model)
+    :param d_z: bottleneck latent dimension (e.g. 16 for RL state)
     :param n_layers: number of stacked causal transformer blocks
     :param n_heads: number of multi-head attention heads (d_model must divide evenly)
     :param dropout: dropout probability for attention and FFN
@@ -50,31 +50,49 @@ class TransformerConfig:
     :param lambda_dir: loss weight on direction cross-entropy
     :param lambda_reg: loss weight on regime cross-entropy
     :param lambda_ret: loss weight on Huber return regression
-    :param dir_label_smoothing: label smoothing for direction cross-entropy
+    :param dir_label_smoothing: label smoothing ε for direction cross-entropy (0 = disabled)
     :param dir_q_low: lower quantile of train returns defining neutral band for direction labels
     :param dir_q_high: upper quantile of train returns defining neutral band for direction labels
+    :param dir_head_hidden: hidden dim for the two-layer direction MLP head (0 = linear only)
     """
     d_feat: int = 7
     d_sent: int = 3
-    window_size: int = 20
+    window_size: int = 30
 
-    d_model: int = 128
-    d_ff: int = 512
-    d_z: int = 32
-    n_layers: int = 4
+    # Reduced from d_model=128/d_ff=512/n_layers=4/n_heads=8 to match ~1240 samples/fold.
+    # Original ~800 K params (645 params/sample) caused extreme overparameterisation;
+    # new config targets ~50–80 K params (~40–65 params/sample).
+    d_model: int = 64
+    d_ff: int = 128
+    d_z: int = 16
+    n_layers: int = 2
     n_heads: int = 4
-    dropout: float = 0.1
+    dropout: float = 0.2
 
     gate_beta: float = 1.0
-    gate_mode: GateMode = GateMode.MASTER
+    gate_mode: GateMode = GateMode.CROSS_ATTN
     readout_mode: ReadoutMode = ReadoutMode.LAST
-    use_pre_tanh_z: bool = False # if true, RL obs uses z_pre instead of z
+    use_pre_tanh_z: bool = False  # if true, RL obs uses z_pre instead of z
 
     n_dir_classes: int = 3
     n_reg_classes: int = 4
-    lambda_dir: float = 1.0
-    lambda_reg: float = 0.5
-    lambda_ret: float = 0.5
-    dir_label_smoothing: float = 0.1
-    dir_q_low: float = 0.40
-    dir_q_high: float = 0.60
+
+    # lambda_dir reduced from 1.0 → 0.5: at random-chance the direction head produced a
+    # gradient 5× larger than the learning regime signal, injecting noise into the shared
+    # representation. Regime weight raised from 0.5 → 1.0 to amplify the useful signal.
+    lambda_dir: float = 0.5
+    lambda_reg: float = 1.0
+    lambda_ret: float = 0.3
+
+    # Label smoothing disabled (was 0.1): added ~0.11 nats to the floor of an already-
+    # failing direction head, making optimisation harder with no benefit at this stage.
+    dir_label_smoothing: float = 0.0
+
+    # Widened neutral band 40/60 → 33/67 to produce balanced 33/33/33 direction classes.
+    # The original 40/60 split left neutral as a 20% minority with no class weighting,
+    # causing the direction head to ignore it entirely.
+    dir_q_low: float = 0.33
+    dir_q_high: float = 0.67
+
+    # Two-layer MLP direction head; 0 = single linear (disabled).
+    dir_head_hidden: int = 32

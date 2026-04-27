@@ -21,7 +21,7 @@ def test_total_input_width():
 
 def test_default_d_model():
     cfg = TransformerConfig()
-    assert cfg.d_model == 128
+    assert cfg.d_model == 64
 
 
 def test_default_n_heads_divides_d_model():
@@ -29,19 +29,20 @@ def test_default_n_heads_divides_d_model():
     assert cfg.d_model % cfg.n_heads == 0
 
 
-def test_default_d_ff_is_4x_d_model():
+def test_default_d_ff_is_2x_d_model():
+    """d_ff is 2× d_model (reduced from 4× to cut params on small dataset)."""
     cfg = TransformerConfig()
-    assert cfg.d_ff == 4 * cfg.d_model
+    assert cfg.d_ff == 2 * cfg.d_model
 
 
 def test_default_d_z():
     cfg = TransformerConfig()
-    assert cfg.d_z == 32
+    assert cfg.d_z == 16
 
 
 def test_default_n_layers():
     cfg = TransformerConfig()
-    assert cfg.n_layers == 4
+    assert cfg.n_layers == 2
 
 
 def test_default_n_heads():
@@ -49,9 +50,9 @@ def test_default_n_heads():
     assert cfg.n_heads == 4
 
 
-def test_default_gate_mode_is_master():
+def test_default_gate_mode_is_cross_attn():
     cfg = TransformerConfig()
-    assert cfg.gate_mode == GateMode.MASTER
+    assert cfg.gate_mode == GateMode.CROSS_ATTN
 
 
 def test_default_readout_mode_is_last():
@@ -94,13 +95,26 @@ def test_cross_attn_gate_mode_selectable():
 
 def test_lambda_defaults():
     cfg = TransformerConfig()
-    assert cfg.lambda_dir == 1.0
-    assert cfg.lambda_reg == 0.5
-    assert cfg.lambda_ret == 0.5
+    assert cfg.lambda_dir == 0.5
+    assert cfg.lambda_reg == 1.0
+    assert cfg.lambda_ret == 0.3
 
 
 def test_dir_quantile_defaults():
+    """Neutral band widened to 33/67 for balanced 33/33/33 direction classes."""
     cfg = TransformerConfig()
-    assert cfg.dir_q_low == 0.40
-    assert cfg.dir_q_high == 0.60
+    assert cfg.dir_q_low == 0.33
+    assert cfg.dir_q_high == 0.67
     assert cfg.dir_q_low < cfg.dir_q_high
+
+
+def test_dir_head_hidden_default():
+    """Direction head defaults to a two-layer MLP with hidden dim 32."""
+    cfg = TransformerConfig()
+    assert cfg.dir_head_hidden == 32
+
+
+def test_dir_label_smoothing_default():
+    """Label smoothing disabled by default to avoid raising the loss floor."""
+    cfg = TransformerConfig()
+    assert cfg.dir_label_smoothing == 0.0
