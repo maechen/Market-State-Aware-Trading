@@ -58,9 +58,9 @@ class MarketTransformer(nn.Module):
         """
         B, W, _ = x.shape
         price_tech = x[..., : self.config.d_feat]
-        sent_last = x[:, -1, self.config.d_feat :]
+        sent_seq = x[:, :, self.config.d_feat :]   # (B, W, d_sent) full sentiment window
 
-        gated = self.gate(price_tech, sent_last)
+        gated = self.gate(price_tech, sent_seq)
 
         if self.feature_proj is not None:
             h = self.feature_proj(gated)

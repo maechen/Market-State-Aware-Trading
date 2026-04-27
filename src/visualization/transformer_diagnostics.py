@@ -393,8 +393,7 @@ def generate_all(run_dir: str | Path, out_subdir: str = "plots") -> list[Path]:
         ("03 cross-fold test metrics", plot_crossfold_test_metrics),
         ("04 direction accuracy",      plot_direction_accuracy),
         ("05 regime accuracy",         plot_regime_accuracy),
-        ("06 latent PCA",              plot_latent_pca),
-        ("07 val vs test loss",        plot_val_vs_test_loss),
+        ("06 val vs test loss",        plot_val_vs_test_loss),
     ]
 
     for name, fn in tasks:

@@ -24,38 +24,42 @@ class SentimentGate(nn.Module):
         nn.init.xavier_uniform_(self.linear.weight)
         nn.init.zeros_(self.linear.bias)
 
-    def forward(self, price_tech: torch.Tensor, sent_last: torch.Tensor) -> torch.Tensor:
+    def forward(self, price_tech: torch.Tensor, sent_seq: torch.Tensor) -> torch.Tensor:
         """
         Element-wise multiply price/tech by d_feat * softmax(Linear(sent_last) / beta) broadcast over time.
+        Uses only the last timestep's sentiment (MASTER paper convention).
         :param price_tech: tensor (batch, W, d_feat)
-        :param sent_last: sentiment at last window timestep, shape (batch, d_sent)
+        :param sent_seq:   tensor (batch, W, d_sent) — full sentiment window; only last step is used
         :return: gated tensor (batch, W, d_feat)
         """
+        sent_last = sent_seq[:, -1, :]  # (B, d_sent) — last-step sentiment only
         gate_w = self.d_feat * F.softmax(self.linear(sent_last) / self.beta, dim=-1)
         return price_tech * gate_w.unsqueeze(1)
 
 
 class CrossAttentionGate(nn.Module):
     """
-    Cross-attention gate: sentiment attends over the price/tech sequence to produce
-    a global context vector, which is then added to each timestep's projected price
-    features.  This preserves the full temporal structure of the price sequence while
-    injecting sentiment-derived information at every position.
+    Cross-attention gate: each sentiment token in the window acts as a query to
+    reweight price/technical features across the same window.
+
+    This matches the project proposal's description: "cross-attention where sentiment
+    tokens act as a query to reweight price/technical features."  The full sentiment
+    sequence (not just the last step) is projected into query space, while the
+    price/tech sequence forms the keys and values.  Multi-head attention then produces,
+    at every timestep t, a sentiment-weighted linear combination of all price/tech
+    vectors — a true per-timestep reweighting of price features by sentiment context.
 
     Forward pass:
-        1. q_proj(sent_last)  → single sentiment query   (B, 1, d_model)
-        2. kv_proj(price_tech) → price keys/values        (B, W, d_model)
-        3. cross-attn(Q, K, V) → sentiment context        (B, 1, d_model)
-        4. price_proj(price_tech) → price residual        (B, W, d_model)
-        5. output = price_residual + broadcast(ctx)       (B, W, d_model)
+        1. q_proj(sent_seq)    → sentiment queries  (B, W, d_model)
+        2. kv_proj(price_tech) → price keys/values  (B, W, d_model)
+        3. cross-attn(Q, K, V) → reweighted output  (B, W, d_model)
 
-    Step 5 ensures that each timestep carries its own price content (step 4) plus
-    a shared sentiment-weighted summary of the entire price history (step 3).  The
-    original design (expand-only) collapsed all temporal information into a single
-    vector; the additive residual corrects this.
+    At each position t the output is a learned weighted sum over all price timesteps,
+    where the weights are determined by how much sentiment_t aligns with each
+    price_j — a proper feature-level reweighting rather than additive fusion.
 
-    :param d_sent: sentiment dimension for query projection
-    :param d_feat: price/tech feature dimension for key/value and residual projections
+    :param d_sent: sentiment dimension (e.g. 3 for Neg/Neu/Pos scores)
+    :param d_feat: price/tech feature dimension for key/value projections
     :param d_model: transformer hidden size (embed_dim for MultiheadAttention)
     :param n_heads: number of attention heads
     :param dropout: dropout on attention weights
@@ -70,29 +74,26 @@ class CrossAttentionGate(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        self.q_proj = nn.Linear(d_sent, d_model)    # sentiment → query
-        self.kv_proj = nn.Linear(d_feat, d_model)   # price → key/value
-        self.price_proj = nn.Linear(d_feat, d_model) # price → residual (temporal path)
+        self.q_proj = nn.Linear(d_sent, d_model)    # sentiment tokens → queries
+        self.kv_proj = nn.Linear(d_feat, d_model)   # price/tech → keys & values
         self.mha = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=n_heads,
             dropout=dropout,
             batch_first=True,
         )
-        for proj in (self.q_proj, self.kv_proj, self.price_proj):
+        for proj in (self.q_proj, self.kv_proj):
             nn.init.xavier_uniform_(proj.weight)
             nn.init.zeros_(proj.bias)
 
-    def forward(self, price_tech: torch.Tensor, sent_last: torch.Tensor) -> torch.Tensor:
+    def forward(self, price_tech: torch.Tensor, sent_seq: torch.Tensor) -> torch.Tensor:
         """
-        Produce a (B, W, d_model) sequence that retains full price temporal structure
-        augmented by a sentiment-derived global context.
-        :param price_tech: tensor (batch, W, d_feat)
-        :param sent_last: tensor (batch, d_sent) — last-step sentiment
-        :return: tensor (batch, W, d_model)
+        Reweight price/tech features at every timestep using sentiment queries.
+        :param price_tech: tensor (batch, W, d_feat) — price and technical features
+        :param sent_seq:   tensor (batch, W, d_sent) — sentiment scores for every timestep
+        :return: tensor (batch, W, d_model) — sentiment-reweighted price representation
         """
-        Q = self.q_proj(sent_last).unsqueeze(1)            # (B, 1, d_model)
+        Q = self.q_proj(sent_seq)                          # (B, W, d_model)
         KV = self.kv_proj(price_tech)                      # (B, W, d_model)
-        ctx, _ = self.mha(Q, KV, KV, need_weights=False)  # (B, 1, d_model)
-        price_h = self.price_proj(price_tech)              # (B, W, d_model)
-        return price_h + ctx                               # broadcast over W → (B, W, d_model)
+        reweighted, _ = self.mha(Q, KV, KV, need_weights=False)  # (B, W, d_model)
+        return reweighted

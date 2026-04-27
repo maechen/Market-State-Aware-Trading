@@ -1,0 +1,17 @@
+{
+  "fold": "fold6",
+  "variant": "no_sentiment",
+  "best_epoch": 26,
+  "best_val_total_loss": 0.8662606818335397,
+  "test_total_loss": 1.1598349154253542,
+  "test_dir_loss": 1.0817336514914706,
+  "test_reg_loss": 0.4377220466539457,
+  "test_ret_loss": 0.6041533848940036,
+  "test_dir_acc": 0.3939393939393939,
+  "test_reg_acc": 0.8658008658008658,
+  "test_num_samples": 231,
+  "latent_rows_train": 1239,
+  "latent_rows_val": 232,
+  "latent_rows_test": 232,
+  "latent_rows_all": 1703
+}

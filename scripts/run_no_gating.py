@@ -18,7 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from src.models.transformer.run import main
 
-DEFAULT_OUTPUT_DIR = "data/transformer_runs/no_gating"
+DEFAULT_OUTPUT_DIR = "data/transformer_npy/no_gating"
 
 
 def _has_arg(argv: Sequence[str], flag: str) -> bool:

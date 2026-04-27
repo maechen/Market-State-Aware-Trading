@@ -21,8 +21,8 @@ if str(SRC_ROOT) not in sys.path:
 from src.models.transformer.run import main
 
 WINDOW_SIZE_SWEEP: tuple[int, ...] = (20, 30, 40, 50, 60)
-DEFAULT_SINGLE_OUTPUT_DIR = "data/transformer_runs/gating"
-DEFAULT_SWEEP_OUTPUT_DIR = "data/transformer_runs/gating_sweep"
+DEFAULT_SINGLE_OUTPUT_DIR = "data/transformer_npy/gating"
+DEFAULT_SWEEP_OUTPUT_DIR = "data/transformer_npy/gating_sweep"
 
 
 def _has_arg(argv: Sequence[str], flag: str) -> bool:
