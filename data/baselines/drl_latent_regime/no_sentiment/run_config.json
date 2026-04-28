@@ -1,0 +1,29 @@
+{
+  "input_path": "data/spy_market_data.csv",
+  "transformer_root": "data/transformer_npy",
+  "variant": "no_sentiment",
+  "regime_root": "data/training",
+  "output_dir": "data/baselines/drl_latent_regime",
+  "ticker": "SPY",
+  "train_timesteps": 200000,
+  "initial_amount": 10000.0,
+  "transaction_cost_pct": 0.001,
+  "reward_scaling": 0.0001,
+  "hmax": 100,
+  "seed": 42,
+  "action_grid": [
+    -1.0,
+    -0.5,
+    0.0,
+    0.5,
+    1.0
+  ],
+  "dqn_learning_rate": 0.0001,
+  "dqn_batch_size": 64,
+  "dqn_buffer_size": 100000,
+  "dqn_learning_starts": 1000,
+  "dqn_train_freq": 4,
+  "dqn_target_update_interval": 500,
+  "dqn_exploration_fraction": 0.4,
+  "dqn_exploration_final_eps": 0.02
+}
