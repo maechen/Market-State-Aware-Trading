@@ -914,7 +914,7 @@ def parse_args(
     parser.add_argument("--n-reg-classes", type=int, default=4)
     parser.add_argument("--lambda-dir", type=float, default=2.0)
     parser.add_argument("--lambda-reg", type=float, default=0.3)
-    parser.add_argument("--lambda-ret", type=float, default=0.5)
+    parser.add_argument("--lambda-ret", type=float, default=0.2)
     parser.add_argument("--dir-label-smoothing", type=float, default=0.0)
     parser.add_argument("--dir-q-low", type=float, default=0.33)
     parser.add_argument("--dir-q-high", type=float, default=0.67)
@@ -949,9 +949,10 @@ def parse_args(
     parser.add_argument(
         "--ret-n-forward",
         type=int,
-        default=5,
-        help="Return label horizon in trading days (default 5). "
-             "Matches direction horizon; 5-day returns are more predictable.",
+        default=20,
+        help="Return label horizon in trading days (default 20). "
+             "20-day cumulative returns have ~2× better SNR than 5-day; "
+             "the return head is an auxiliary encoder regulariser, not the primary task.",
     )
     parser.add_argument(
         "--ret-var-coeff",
@@ -964,13 +965,13 @@ def parse_args(
         "--use-task-specific-heads",
         action="store_true",
         default=True,
-        help="Direction and return heads read from h_pooled (bypass tanh bottleneck).",
+        help="Direction and return heads read from h_pooled (bypass the 64→16 bottleneck projection).",
     )
     parser.add_argument(
         "--no-task-specific-heads",
         dest="use_task_specific_heads",
         action="store_false",
-        help="Revert direction/return heads to read from z (tanh bottleneck); backward-compat.",
+        help="Revert direction/return heads to read from z (16-dim bottleneck); ablation only.",
     )
     parser.add_argument(
         "--no-shuffle-train",

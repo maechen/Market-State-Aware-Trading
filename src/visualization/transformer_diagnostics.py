@@ -46,7 +46,7 @@ plt.rcParams.update({
     "savefig.bbox": "tight",
 })
 
-RANDOM_CHANCE_DIR = 1 / 3  # uniform 3-class
+RANDOM_CHANCE_DIR = 0.5  # binary Up/Down (2-class default; n_dir_classes=2)
 
 
 # ── Data loading helpers ───────────────────────────────────────────────────────

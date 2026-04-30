@@ -8,15 +8,14 @@ import torch.nn as nn
 
 class DirectionHead(nn.Module):
     """
-    next-day direction logits (bear / neutral / bull).
+    n-day forward direction logits (binary Up/Down by default).
 
     When hidden > 0 the head uses a two-layer MLP
-    (Linear → GELU → Dropout → Linear) for greater expressivity over the
-    tanh-bounded bottleneck latent.  When hidden == 0 it degrades to a
-    single linear map for backward compatibility.
+    (Linear → GELU → Dropout → Linear) for greater expressivity.
+    When hidden == 0 it degrades to a single linear map.
 
-    :param d_z: bottleneck dimension
-    :param n_classes: number of direction classes (default 3)
+    :param d_z: input dimension (d_model when use_task_specific_heads=True, else d_z)
+    :param n_classes: number of direction classes (2 = binary Up/Down default, 3 = Bear/Neutral/Bull)
     :param hidden: inner hidden size of the MLP; 0 = linear-only
     :param dropout: dropout rate inside the MLP (ignored when hidden == 0)
     """
@@ -24,7 +23,7 @@ class DirectionHead(nn.Module):
     def __init__(
         self,
         d_z: int,
-        n_classes: int = 3,
+        n_classes: int = 2,
         hidden: int = 0,
         dropout: float = 0.1,
     ) -> None:
@@ -79,8 +78,8 @@ class RegimeHead(nn.Module):
 
 class ReturnHead(nn.Module):
     """
-    scalar prediction of standardized next-day log return
-    :param d_z: bottleneck dimension
+    scalar prediction of standardized n-day forward log return (median, τ=0.5).
+    :param d_z: input dimension (d_model when use_task_specific_heads=True, else d_z)
     """
 
     def __init__(self, d_z: int) -> None:

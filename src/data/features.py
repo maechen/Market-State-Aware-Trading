@@ -227,8 +227,8 @@ def standardize_returns(
     Standardizes eval_ret using training fold mean and std.
 
     Args:
-        train_ret : NaN-free training next-day returns
-        eval_ret  : target split next-day returns (may contain NaN at last pos)
+        train_ret : NaN-free training n-day forward returns (finite values only)
+        eval_ret  : target split n-day forward returns (may contain NaN at tail)
     Returns:
         standardized : float32 array
         mean         : training mean

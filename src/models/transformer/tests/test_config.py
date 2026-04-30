@@ -97,11 +97,11 @@ def test_lambda_defaults():
     cfg = TransformerConfig()
     assert cfg.lambda_dir == 2.0
     assert cfg.lambda_reg == 0.3
-    assert cfg.lambda_ret == 0.5
+    assert cfg.lambda_ret == 0.2
 
 
 def test_use_task_specific_heads_default():
-    """Direction and return heads bypass tanh bottleneck by default."""
+    """Direction and return heads bypass the 64→16 bottleneck projection by default."""
     cfg = TransformerConfig()
     assert cfg.use_task_specific_heads is True
 

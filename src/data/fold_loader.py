@@ -106,7 +106,7 @@ def get_fold_loaders(
     shuffle_train: bool = True,
     n_dir_classes: int = 2,
     dir_n_forward: int = 5,
-    ret_n_forward: int = 5,
+    ret_n_forward: int = 20,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Loads train/val/test CSVs from fold_dir, applies the full feature
@@ -124,7 +124,11 @@ def get_fold_loaders(
         shuffle_train : randomise training batch order (recommended)
         n_dir_classes : 2 = binary Up/Down (default); 3 = Bear/Neutral/Bull
         dir_n_forward : label horizon for direction target (days ahead, default 5)
-        ret_n_forward : label horizon for return target (days ahead, default 5)
+        ret_n_forward : label horizon for return target (days ahead, default 20).
+                        20-day cumulative returns have ~2× better SNR than 5-day;
+                        the return head is an auxiliary task that shapes the shared
+                        encoder — a longer horizon reduces label noise without
+                        degrading the direction or regime signals.
 
     Returns:
         (train_loader, val_loader, test_loader)

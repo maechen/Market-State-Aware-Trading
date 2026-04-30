@@ -3,18 +3,19 @@ SPYWindowDataset — sliding-window dataset built from one fold split.
 
 Each sample is a W-day feature window plus three aligned labels for the
 last day of that window:
-    y_dir     : next-day direction (0=Bear, 1=Neutral, 2=Bull)
-    y_reg     : HMM regime label at the last window day
-    y_ret_std : standardized next-day log_return at the last window day
+    y_dir     : n-day forward direction (0=Down, 1=Up); binary by default
+    y_reg     : HMM regime label at the last window day (0..K-1, K=4)
+    y_ret_std : standardized n-day forward log return at the last window day
 
 Label alignment note:
     For window index idx (rows [idx, idx+W)), all three labels are derived
     from row idx+W-1 (the last day of the window).
 
-    dir_labels[idx+W-1] and ret_std[idx+W-1] were computed as
-    shift(-1) quantities, so they reference log_return[idx+W] which must
-    exist. Therefore the valid range of idx is [0, n_rows - W - 1], giving
-    n_rows - W total samples.
+    dir_labels[idx+W-1] and ret_std[idx+W-1] are forward-looking quantities
+    computed by _fwd_return() in fold_loader.py.  Direction uses dir_n_forward
+    (default 5) and return uses ret_n_forward (default 20) trading days ahead.
+    The last max(dir_n_forward, ret_n_forward) rows have NaN labels (no complete
+    forward window) and are replaced with 0 via nan_to_num — negligible contamination.
 
 IMPORTANT — Viterbi look-ahead within training split:
     Regime labels on training rows are Viterbi-decoded over the entire
@@ -34,10 +35,10 @@ class SPYWindowDataset(Dataset):
     Args:
         features      : (n_rows, d_feat+d_sent) float32 — normalized features
         regime_labels : (n_rows,) int64 — HMM state per row
-        dir_labels    : (n_rows,) int64 — direction label per row
-                        dir_labels[i] = direction of log_return[i+1]
-        ret_std       : (n_rows,) float32 — standardized next-day return
-                        ret_std[i] = (log_return[i+1] - mean) / std
+        dir_labels    : (n_rows,) int64 — n-day forward direction label per row
+                        dir_labels[i] = Up/Down over dir_n_forward days from i
+        ret_std       : (n_rows,) float32 — standardized n-day forward return
+                        ret_std[i] = (cumulative_ret[i+1..i+ret_n_forward] - mean) / std
         window_size   : W (number of consecutive days per sample)
     """
 

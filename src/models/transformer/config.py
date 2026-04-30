@@ -45,11 +45,12 @@ class TransformerConfig:
     :param gate_mode: MASTER or CROSS_ATTN gating variant
     :param readout_mode: LAST, MEAN, or ATTN_POOL temporal pooling
     :param use_pre_tanh_z: if True, downstream RL uses z_pre instead of z
-    :param n_dir_classes: direction head classes (Bear/Neutral/Bull = 3)
-    :param n_reg_classes: regime head classes (GHMM states, typically 4)
+    :param n_dir_classes: direction head classes (2 = binary Up/Down, default;
+                           3 = Bear/Neutral/Bull, legacy — suffers quantile drift)
+    :param n_reg_classes: regime head classes (GHMM states; BIC selects K=4)
     :param lambda_dir: loss weight on direction cross-entropy
     :param lambda_reg: loss weight on regime cross-entropy
-    :param lambda_ret: loss weight on Huber return regression
+    :param lambda_ret: loss weight on Quantile (pinball, τ=0.5) return regression
     :param dir_label_smoothing: label smoothing ε for direction cross-entropy (0 = disabled)
     :param dir_q_low: lower quantile of train returns defining neutral band for direction labels
     :param dir_q_high: upper quantile of train returns defining neutral band for direction labels
@@ -93,10 +94,13 @@ class TransformerConfig:
     # lambda_reg raised from 0.2 to 0.3: the CrossAttentionGate is less efficient
     # at preserving regime-discriminative features than the multiplicative MASTER gate;
     # a slightly stronger regime signal helps recover the ~6 pp accuracy regression.
-    # lambda_ret raised to 0.5 to give the return head a stronger learning signal.
+    # lambda_ret reduced to 0.2: the 20-day return target is genuinely noisier than
+    # direction/regime, so its gradient contribution is capped to avoid polluting the
+    # shared encoder.  The return head still provides an auxiliary regularising signal
+    # that shapes the latent space toward return-relevant features (SOTA: arxiv:2411.01456).
     lambda_dir: float = 2.0
     lambda_reg: float = 0.3
-    lambda_ret: float = 0.5
+    lambda_ret: float = 0.2
 
     # Label smoothing disabled (was 0.1): added ~0.11 nats to the floor of an already-
     # failing direction head, making optimisation harder with no benefit at this stage.

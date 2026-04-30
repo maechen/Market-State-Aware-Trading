@@ -137,7 +137,7 @@ class MarketTransformer(nn.Module):
         self, out: dict, targets: dict
     ) -> tuple[torch.Tensor, dict]:
         """
-        weighted sum of direction CE, regime CE, and huber return loss.
+        weighted sum of focal direction CE, regime CE, and Quantile (pinball τ=0.5) return loss.
         :param out: forward() output dict
         :param targets: dict with y_dir, y_reg, y_ret_std (batch tensors); optional dir_weights for CE
         :return:
