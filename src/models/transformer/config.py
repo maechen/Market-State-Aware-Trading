@@ -89,7 +89,7 @@ class TransformerConfig:
     n_dir_classes: int = 2
     n_reg_classes: int = 4
 
-    # Loss = λ_dir × focal_CE(direction) + λ_reg × CE(regime).
+    # Loss = λ_dir × CE(direction) + λ_reg × CE(regime).
     # λ_dir=2.0 gives direction priority in the gradient budget.
     # λ_reg=0.3: the CrossAttentionGate is slightly less efficient at preserving
     # regime-discriminative features than the multiplicative MASTER gate.
@@ -115,20 +115,4 @@ class TransformerConfig:
     # still discards information.  Task-specific heads give dir/ret 4× more capacity
     # and decouple their gradients from the regime→z path.  Set False only to ablate.
     use_task_specific_heads: bool = True
-
-    # Focal loss exponent γ for the direction cross-entropy.  γ=0 reduces to
-    # standard cross-entropy; γ=2 down-weights ambiguous boundary samples (returns
-    # very close to the neutral-band thresholds) and focuses gradients on harder,
-    # more clearly-labelled examples.
-    focal_gamma: float = 2.0
-
-    # Entropy regularisation coefficient for the direction head.
-    # Subtracts `dir_entropy_coeff * H(softmax(dir_logits))` from dir_loss to
-    # MAXIMISE prediction entropy, preventing the head from collapsing to always
-    # predicting the same class (mode collapse).  0.3 is needed because later
-    # walk-forward folds (fold5/7/8) include 2018/2020 down periods in training
-    # that bias the model toward predicting Down even when the test period is
-    # bullish.  The penalty ≈ 0.3 × ln(2) ≈ 0.21 nats must exceed the CE gain
-    # from collapsing; 0.1 was insufficient, 0.3 empirically resolves fold5/7/8.
-    dir_entropy_coeff: float = 0.3
 

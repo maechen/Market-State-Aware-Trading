@@ -146,8 +146,6 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         dir_q_high=args.dir_q_high,
         dir_head_hidden=args.dir_head_hidden,
         use_task_specific_heads=args.use_task_specific_heads,
-        focal_gamma=args.focal_gamma,
-        dir_entropy_coeff=args.dir_entropy_coeff,
     )
 
 
@@ -183,7 +181,6 @@ def _run_epoch(
     d_feat: int,
     optimizer: torch.optim.Optimizer | None = None,
     max_batches: int | None = None,
-    dir_class_weights: torch.Tensor | None = None,
     grad_clip: float = 1.0,
 ) -> dict[str, float]:
     is_train = optimizer is not None
@@ -212,8 +209,6 @@ def _run_epoch(
             "y_dir": y_dir.to(device=device, dtype=torch.long, non_blocking=True),
             "y_reg": y_reg.to(device=device, dtype=torch.long, non_blocking=True),
         }
-        if dir_class_weights is not None:
-            targets["dir_weights"] = dir_class_weights
 
         if is_train:
             optimizer.zero_grad(set_to_none=True)
@@ -608,16 +603,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 optimizer, T_max=args.epochs, eta_min=1e-6
             )
 
-        # Compute per-class weights for the direction CE loss from training labels.
-        # Inverse-frequency weighting compensates for the 40/20/40 (or 33/33/33)
-        # imbalance; weights are normalised so their mean equals 1.0.
-        train_dir_labels = torch.from_numpy(
-            train_loader.dataset.dir_labels.astype("int64")
-        )
-        dir_counts = torch.bincount(train_dir_labels, minlength=config.n_dir_classes).float()
-        dir_class_weights = (1.0 / dir_counts.clamp(min=1.0))
-        dir_class_weights = (dir_class_weights / dir_class_weights.mean()).to(device)
-
         fold_output = output_root / fold_name
         fold_output.mkdir(parents=True, exist_ok=True)
         best_ckpt_path = fold_output / "best_model.pt"
@@ -643,7 +628,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 d_feat=config.d_feat,
                 optimizer=optimizer,
                 max_batches=args.max_train_batches,
-                dir_class_weights=dir_class_weights,
                 grad_clip=args.grad_clip,
             )
             val_metrics = _run_epoch(
@@ -904,23 +888,6 @@ def parse_args(
         type=int,
         default=32,
         help="Hidden dim for two-layer direction MLP head; 0 = single linear.",
-    )
-    parser.add_argument(
-        "--focal-gamma",
-        type=float,
-        default=2.0,
-        help="Focal loss exponent γ for direction head; 0 = standard cross-entropy.",
-    )
-    parser.add_argument(
-        "--dir-entropy-coeff",
-        type=float,
-        default=0.3,
-        help=(
-            "Entropy regularisation weight for direction head (0 = disabled). "
-            "Subtracts coeff*H(softmax(logits)) from dir_loss to prevent mode collapse. "
-            "0.3 is required to overcome the directional bias that later folds (5/7/8) "
-            "acquire from 2018/2020 down-market periods in their training windows."
-        ),
     )
     parser.add_argument(
         "--dir-n-forward",

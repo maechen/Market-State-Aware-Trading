@@ -12,40 +12,12 @@ encoder (MTL task-interference literature, MT2ST OpenReview 2024).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 from .config import TransformerConfig, GateMode
 from .gate import SentimentGate, CrossAttentionGate
 from .layers import PositionalEncoding, TransformerStack, TemporalReadout, make_causal_mask
 from .bottleneck import Bottleneck
 from .heads import DirectionHead, RegimeHead
-
-
-def _focal_cross_entropy(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    gamma: float = 2.0,
-    weight: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """
-    Focal cross-entropy: FL(p_t) = -(1 - p_t)^γ · log(p_t).
-
-    When γ=0 this is identical to standard cross-entropy.
-    When γ>0 easy examples (high p_t) receive a downscaled gradient, forcing
-    the model to focus on harder, more informative boundary samples.
-
-    :param logits:  (B, C) raw scores
-    :param targets: (B,) class indices
-    :param gamma:   focusing exponent (0 = standard CE, 2 = typical focal)
-    :param weight:  (C,) optional per-class weights applied before focal scaling
-    :return: scalar mean focal loss
-    """
-    log_probs = F.log_softmax(logits, dim=-1)
-    nll = F.nll_loss(log_probs, targets, weight=weight, reduction="none")
-    probs = log_probs.exp()
-    pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-    focal_weight = (1.0 - pt) ** gamma
-    return (focal_weight * nll).mean()
 
 
 class MarketTransformer(nn.Module):
@@ -148,29 +120,11 @@ class MarketTransformer(nn.Module):
         """
         cfg = self.config
 
-        if cfg.focal_gamma > 0:
-            dir_loss = _focal_cross_entropy(
-                out["dir_logits"],
-                targets["y_dir"],
-                gamma=cfg.focal_gamma,
-                weight=targets.get("dir_weights"),
-            )
-        else:
-            dir_loss = F.cross_entropy(
-                out["dir_logits"],
-                targets["y_dir"],
-                weight=targets.get("dir_weights"),
-                label_smoothing=cfg.dir_label_smoothing,
-            )
-
-        # Entropy regularisation — maximise prediction entropy to prevent mode
-        # collapse (e.g. always predicting Down).  Coefficient 0.3 is needed
-        # because later folds (fold5/7/8) acquire a strong Down bias from
-        # 2018/2020 crash periods in their training windows; 0.1 was insufficient.
-        if cfg.dir_entropy_coeff > 0:
-            dir_probs = F.softmax(out["dir_logits"], dim=-1).clamp(min=1e-8)
-            dir_entropy = -(dir_probs * dir_probs.log()).sum(dim=-1).mean()
-            dir_loss = dir_loss - cfg.dir_entropy_coeff * dir_entropy
+        dir_loss = F.cross_entropy(
+            out["dir_logits"],
+            targets["y_dir"],
+            label_smoothing=cfg.dir_label_smoothing,
+        )
 
         reg_loss = F.cross_entropy(out["reg_logits"], targets["y_reg"])
 
