@@ -12,6 +12,7 @@ encoder (MTL task-interference literature, MT2ST OpenReview 2024).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 from .config import TransformerConfig, GateMode
 from .gate import SentimentGate, CrossAttentionGate
@@ -27,7 +28,7 @@ class MarketTransformer(nn.Module):
     Direction head: predicts n-day forward Up/Down (binary classification).
     Regime head:    predicts HMM market state (0..K-1, K=4).
 
-    Loss = λ_dir × focal_CE(direction) + λ_reg × CE(regime)
+    Loss = λ_dir × CE(direction) + λ_reg × CE(regime)
 
     :param config: TransformerConfig with dimensions, gate mode, readout, and loss weights
     """
@@ -110,10 +111,10 @@ class MarketTransformer(nn.Module):
         self, out: dict, targets: dict
     ) -> tuple[torch.Tensor, dict]:
         """
-        Loss = λ_dir × focal_CE(direction) + λ_reg × CE(regime)
+        Loss = λ_dir × CE(direction) + λ_reg × CE(regime)
 
         :param out:     forward() output dict (z, dir_logits, reg_logits)
-        :param targets: dict with y_dir (int64), y_reg (int64); optional dir_weights
+        :param targets: dict with y_dir (int64), y_reg (int64)
         :return:
           total : scalar loss tensor for backprop
           info  : dict of float component losses (dir_loss, reg_loss, total_loss)
