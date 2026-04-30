@@ -98,6 +98,10 @@ class TransformerConfig:
 
     # Two-layer MLP direction head; 0 = single linear (disabled).
     dir_head_hidden: int = 32
+    dir_label_mode: str = "sign"
+    dir_vol_k: float = 0.50
+    dir_vol_col: str = "rolling_vol_20"
+    dir_ignore_index: int = -1
 
     # When True, the direction head bypasses the 16-dim bottleneck and reads
     # directly from h_pooled (64-dim).  The tanh activation was already removed from
@@ -107,4 +111,3 @@ class TransformerConfig:
     # may discard direction-relevant information, so the task-specific direction
     # head gets 4× more input capacity. Set False only to ablate.
     use_task_specific_heads: bool = True
-

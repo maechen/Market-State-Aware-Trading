@@ -121,11 +121,17 @@ class MarketTransformer(nn.Module):
         """
         cfg = self.config
 
-        dir_loss = F.cross_entropy(
-            out["dir_logits"],
-            targets["y_dir"],
-            label_smoothing=cfg.dir_label_smoothing,
-        )
+        y_dir = targets["y_dir"]
+        dir_mask = y_dir != cfg.dir_ignore_index
+        n_dir_events = int(dir_mask.sum().item())
+        if n_dir_events > 0:
+            dir_loss = F.cross_entropy(
+                out["dir_logits"][dir_mask],
+                y_dir[dir_mask],
+                label_smoothing=cfg.dir_label_smoothing,
+            )
+        else:
+            dir_loss = out["dir_logits"].sum() * 0.0
 
         reg_loss = F.cross_entropy(out["reg_logits"], targets["y_reg"])
 
@@ -135,6 +141,8 @@ class MarketTransformer(nn.Module):
             "dir_loss": dir_loss.item(),
             "reg_loss": reg_loss.item(),
             "total_loss": total.item(),
+            "dir_event_count": float(n_dir_events),
+            "dir_coverage_batch": float(n_dir_events) / float(y_dir.numel()),
         }
 
     def configure_optimizers(self, lr: float, weight_decay: float) -> list[dict]:
