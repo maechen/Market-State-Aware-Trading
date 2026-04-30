@@ -153,7 +153,29 @@ def test_dir_entropy_coeff_can_be_disabled():
     assert cfg.dir_entropy_coeff == 0.0
 
 
-def test_d_feat_default_includes_regime_probs():
-    """d_feat=11: 6 scaled + 1 RSI + 4 regime_prob pass-through."""
+def test_d_feat_default_includes_momentum_and_regime():
+    """d_feat=16: 10 scaled + 1 RSI + 1 BB%B + 4 regime_prob pass-through."""
     cfg = TransformerConfig()
-    assert cfg.d_feat == 11
+    assert cfg.d_feat == 16
+
+
+def test_n_dir_classes_default_binary():
+    """Default direction head is binary (up/down) to avoid quantile distribution shift."""
+    cfg = TransformerConfig()
+    assert cfg.n_dir_classes == 2
+
+
+def test_n_dir_classes_can_be_three():
+    cfg = TransformerConfig(n_dir_classes=3)
+    assert cfg.n_dir_classes == 3
+
+
+def test_ret_var_coeff_default():
+    """Return variance regulariser defaults to 0.1."""
+    cfg = TransformerConfig()
+    assert cfg.ret_var_coeff == 0.1
+
+
+def test_ret_var_coeff_can_be_disabled():
+    cfg = TransformerConfig(ret_var_coeff=0.0)
+    assert cfg.ret_var_coeff == 0.0

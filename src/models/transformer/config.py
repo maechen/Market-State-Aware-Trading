@@ -55,10 +55,14 @@ class TransformerConfig:
     :param dir_q_high: upper quantile of train returns defining neutral band for direction labels
     :param dir_head_hidden: hidden dim for the two-layer direction MLP head (0 = linear only)
     """
-    # 11 price/tech features: 6 z-scored + 1 RSI-norm + 4 regime_prob pass-through
-    # (up from 7; the 4 HMM posterior probabilities are added as price/tech features
-    #  so CrossAttentionGate can learn regime-conditioned price representations)
-    d_feat: int = 11
+    # 16 price/tech features:
+    #   z-scored (10): log_return, rolling_vol_20, macd, close_to_ma10,
+    #                  close_to_ma20, ma10_to_ma50, roc_5, macd_hist,
+    #                  atr_ratio, vol_ratio
+    #   bounded (1):   rsi_norm
+    #   bounded (1):   bb_pct (Bollinger Band %B)
+    #   pass-through (4): regime_prob_0..3
+    d_feat: int = 16
     d_sent: int = 3
     window_size: int = 30
 
@@ -77,7 +81,12 @@ class TransformerConfig:
     readout_mode: ReadoutMode = ReadoutMode.LAST
     use_pre_tanh_z: bool = False  # if true, RL obs uses z_pre instead of z
 
-    n_dir_classes: int = 3
+    # Binary direction (2) is the default.  The 3-class (Bear/Neutral/Bull)
+    # approach suffers from quantile-threshold distribution shift between
+    # training and test periods, causing 60-70 % of test labels to be Neutral
+    # and inducing mode collapse.  Binary up/down (sign of n-day forward return)
+    # eliminates this problem entirely.
+    n_dir_classes: int = 2
     n_reg_classes: int = 4
 
     # lambda_dir raised to 2.0 so direction gets priority in the gradient budget.
@@ -121,3 +130,10 @@ class TransformerConfig:
     # predicting the same class (mode collapse).  Empirically 0.05–0.15 is a good
     # range; set to 0.0 to disable.
     dir_entropy_coeff: float = 0.1
+
+    # Return head: variance regularisation coefficient.
+    # Adds `ret_var_coeff * ReLU(0.3 - std(ret_pred))` to ret_loss to penalise
+    # near-constant predictions and encourage the return head to spread its
+    # outputs.  The threshold 0.3 is relative to standardised scale (≈ 0.3σ).
+    # Set to 0.0 to disable.
+    ret_var_coeff: float = 0.1

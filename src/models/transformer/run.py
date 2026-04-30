@@ -149,6 +149,7 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         use_task_specific_heads=args.use_task_specific_heads,
         focal_gamma=args.focal_gamma,
         dir_entropy_coeff=args.dir_entropy_coeff,
+        ret_var_coeff=args.ret_var_coeff,
     )
 
 
@@ -593,6 +594,9 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             q_high=config.dir_q_high,
             num_workers=args.num_workers,
             shuffle_train=args.shuffle_train,
+            n_dir_classes=config.n_dir_classes,
+            dir_n_forward=args.dir_n_forward,
+            ret_n_forward=args.ret_n_forward,
         )
 
         feature_dim = int(train_loader.dataset.features.shape[1])
@@ -879,8 +883,8 @@ def parse_args(
 
     # Model / labels
     parser.add_argument("--window-size", type=int, default=20)
-    parser.add_argument("--d-feat", type=int, default=11,
-                        help="Price/tech feature channels (6 scaled + 1 RSI + 4 regime_prob).")
+    parser.add_argument("--d-feat", type=int, default=16,
+                        help="Price/tech feature channels (10 scaled + 1 RSI + 1 BB + 4 regime_prob).")
     parser.add_argument("--d-sent", type=int, default=3)
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--d-ff", type=int, default=128)
@@ -904,7 +908,9 @@ def parse_args(
         action="store_true",
         help="Set TransformerConfig.use_pre_tanh_z=True.",
     )
-    parser.add_argument("--n-dir-classes", type=int, default=3)
+    parser.add_argument("--n-dir-classes", type=int, default=2,
+                        help="Direction head output classes: 2=binary Up/Down (default), "
+                             "3=Bear/Neutral/Bull.")
     parser.add_argument("--n-reg-classes", type=int, default=4)
     parser.add_argument("--lambda-dir", type=float, default=2.0)
     parser.add_argument("--lambda-reg", type=float, default=0.3)
@@ -932,6 +938,27 @@ def parse_args(
             "Entropy regularisation weight for direction head (0 = disabled). "
             "Subtracts coeff*H(softmax(logits)) from dir_loss to prevent mode collapse."
         ),
+    )
+    parser.add_argument(
+        "--dir-n-forward",
+        type=int,
+        default=5,
+        help="Direction label horizon in trading days (default 5). "
+             "5-day forward returns have stronger momentum signal than 1-day.",
+    )
+    parser.add_argument(
+        "--ret-n-forward",
+        type=int,
+        default=5,
+        help="Return label horizon in trading days (default 5). "
+             "Matches direction horizon; 5-day returns are more predictable.",
+    )
+    parser.add_argument(
+        "--ret-var-coeff",
+        type=float,
+        default=0.1,
+        help="Return head variance regulariser weight (0 = disabled). "
+             "Penalises near-constant return predictions to force spread.",
     )
     parser.add_argument(
         "--use-task-specific-heads",

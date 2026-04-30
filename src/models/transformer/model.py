@@ -171,7 +171,21 @@ class MarketTransformer(nn.Module):
             dir_loss = dir_loss - cfg.dir_entropy_coeff * dir_entropy
 
         reg_loss = F.cross_entropy(out["reg_logits"], targets["y_reg"])
-        ret_loss = F.huber_loss(out["ret_pred"].squeeze(-1), targets["y_ret_std"].float())
+
+        # Quantile (pinball) loss at τ=0.5 replaces Huber for the return head.
+        # τ=0.5 is median regression (= 0.5 × MAE).  Unlike Huber, the gradient
+        # magnitude is constant (±0.5) everywhere, so the model cannot reduce
+        # gradients by staying near zero — it must track the actual median.
+        ret_pred = out["ret_pred"].squeeze(-1)
+        ret_true = targets["y_ret_std"].float()
+        residual  = ret_true - ret_pred
+        ret_loss  = torch.where(residual >= 0, 0.5 * residual, -0.5 * residual).mean()
+
+        # Variance regulariser: penalise predictions with batch std < 0.3 to
+        # discourage the return head from collapsing to a near-constant output.
+        if cfg.ret_var_coeff > 0:
+            batch_std = ret_pred.std()
+            ret_loss  = ret_loss + cfg.ret_var_coeff * F.relu(0.3 - batch_std)
 
         total = cfg.lambda_dir * dir_loss + cfg.lambda_reg * reg_loss + cfg.lambda_ret * ret_loss
 
