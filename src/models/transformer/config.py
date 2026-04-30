@@ -102,7 +102,9 @@ class TransformerConfig:
     # When True, the direction head bypasses the 16-dim bottleneck and reads
     # directly from h_pooled (64-dim).  The tanh activation was already removed from
     # the bottleneck (fixing gradient saturation), but the linear 64→16 projection
-    # still discards information.  Task-specific heads give dir/ret 4× more capacity
-    # and decouple their gradients from the regime→z path.  Set False only to ablate.
+    # still discards information.  When True, the direction head bypasses the 16-dim bottleneck and reads
+    # directly from h_pooled (64-dim). The linear 64→16 bottleneck projection
+    # may discard direction-relevant information, so the task-specific direction
+    # head gets 4× more input capacity. Set False only to ablate.
     use_task_specific_heads: bool = True
 

@@ -103,8 +103,6 @@ def get_fold_loaders(
     fold_dir: str,
     window_size: int = 20,
     batch_size: int = 64,
-    q_low: float = 0.40,
-    q_high: float = 0.60,
     num_workers: int = 0,
     shuffle_train: bool = True,
     n_dir_classes: int = 2,
@@ -182,17 +180,17 @@ def get_fold_loaders(
     train_dir_all, lo, hi = make_direction_labels(
         train_fwd_dir_finite,
         train_fwd_dir,
-        q_low, q_high, n_classes=n_dir_classes,
+        n_classes=n_dir_classes,
     )
     val_dir_all, _, _ = make_direction_labels(
         train_fwd_dir_finite,
         _fwd_return(val_df, dir_n_forward).values,
-        q_low, q_high, n_classes=n_dir_classes,
+        n_classes=n_dir_classes,
     )
     test_dir_all, _, _ = make_direction_labels(
         train_fwd_dir_finite,
         _fwd_return(test_df, dir_n_forward).values,
-        q_low, q_high, n_classes=n_dir_classes,
+        n_classes=n_dir_classes,
     )
 
     # ── Regime labels ─────────────────────────────────────────────────────

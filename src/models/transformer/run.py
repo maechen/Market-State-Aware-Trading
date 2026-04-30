@@ -601,7 +601,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         best_ckpt_path = fold_output / "best_model.pt"
 
         # Early stopping tracks the sum of direction + regime validation losses.
-        # Early stopping tracks the sum of direction + regime validation losses.
         # With the return head removed, this is equivalent to tracking the two
         # supervised objectives used by the current model.
         best_val_primary_loss = float("inf")  # dir_loss + reg_loss only

@@ -29,23 +29,18 @@
     "d_model": 64,
     "d_ff": 128,
     "d_z": 16,
-    "n_layers": 3,
+    "n_layers": 2,
     "n_heads": 4,
     "dropout": 0.3,
     "gate_beta": 1.0,
     "gate_mode": "master",
     "readout_mode": "attn_pool",
-    "use_pre_tanh_z": false,
     "n_dir_classes": 2,
     "n_reg_classes": 4,
     "lambda_dir": 2.0,
     "lambda_reg": 0.3,
     "dir_label_smoothing": 0.0,
-    "dir_q_low": 0.33,
-    "dir_q_high": 0.67,
     "dir_head_hidden": 32,
-    "use_task_specific_heads": true,
-    "focal_gamma": 2.0,
-    "dir_entropy_coeff": 0.3
+    "use_task_specific_heads": true
   }
 }
