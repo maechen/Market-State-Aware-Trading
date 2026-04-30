@@ -64,7 +64,7 @@ class TransformerConfig:
     #   pass-through (4): regime_prob_0..3
     d_feat: int = 16
     d_sent: int = 3
-    window_size: int = 30
+    window_size: int = 20
 
     # Reduced from d_model=128/d_ff=512/n_layers=4/n_heads=8 to match ~1240 samples/fold.
     # Original ~800 K params (645 params/sample) caused extreme overparameterisation;
