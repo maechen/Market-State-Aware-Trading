@@ -136,14 +136,11 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         gate_beta=args.gate_beta,
         gate_mode=gate_mode,
         readout_mode=readout_mode,
-        use_pre_tanh_z=args.use_pre_tanh_z,
         n_dir_classes=args.n_dir_classes,
         n_reg_classes=args.n_reg_classes,
         lambda_dir=args.lambda_dir,
         lambda_reg=args.lambda_reg,
         dir_label_smoothing=args.dir_label_smoothing,
-        dir_q_low=args.dir_q_low,
-        dir_q_high=args.dir_q_high,
         dir_head_hidden=args.dir_head_hidden,
         use_task_specific_heads=args.use_task_specific_heads,
     )
@@ -506,8 +503,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-train-batches must be >= 1 when provided.")
     if args.max_eval_batches is not None and args.max_eval_batches <= 0:
         raise ValueError("--max-eval-batches must be >= 1 when provided.")
-    if not (0.0 <= args.dir_q_low < args.dir_q_high <= 1.0):
-        raise ValueError("Direction quantiles must satisfy 0 <= q_low < q_high <= 1.")
     if args.variant == "no_gating" and args.gate_mode != GateMode.MASTER.value:
         print(
             "[Info] no_gating selected; overriding gate_mode to 'master' "
@@ -562,8 +557,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             fold_dir=str(fold_dir),
             window_size=config.window_size,
             batch_size=args.batch_size,
-            q_low=config.dir_q_low,
-            q_high=config.dir_q_high,
             num_workers=args.num_workers,
             shuffle_train=args.shuffle_train,
             n_dir_classes=config.n_dir_classes,
@@ -608,12 +601,9 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         best_ckpt_path = fold_output / "best_model.pt"
 
         # Early stopping tracks the sum of direction + regime validation losses.
-        # The auxiliary return head loss is intentionally excluded: during the
-        # first ~10 epochs the return head transitions from near-zero predictions
-        # to spread predictions (variance regulariser), which transiently spikes
-        # (previously, return-head loss spikes contaminated early stopping here)
-        # return loss in early stopping caused premature termination (e.g. fold6
-        # stopped at epoch 3) and severely degraded regime accuracy.
+        # Early stopping tracks the sum of direction + regime validation losses.
+        # With the return head removed, this is equivalent to tracking the two
+        # supervised objectives used by the current model.
         best_val_primary_loss = float("inf")  # dir_loss + reg_loss only
         best_val_loss = float("inf")           # total (for reporting in fold_summary.json)
         best_epoch = -1
@@ -869,11 +859,6 @@ def parse_args(
         choices=[mode.value for mode in ReadoutMode],
         default=ReadoutMode.ATTN_POOL.value,
     )
-    parser.add_argument(
-        "--use-pre-tanh-z",
-        action="store_true",
-        help="Set TransformerConfig.use_pre_tanh_z=True.",
-    )
     parser.add_argument("--n-dir-classes", type=int, default=2,
                         help="Direction head output classes: 2=binary Up/Down (default), "
                              "3=Bear/Neutral/Bull.")
@@ -881,8 +866,6 @@ def parse_args(
     parser.add_argument("--lambda-dir", type=float, default=2.0)
     parser.add_argument("--lambda-reg", type=float, default=0.3)
     parser.add_argument("--dir-label-smoothing", type=float, default=0.0)
-    parser.add_argument("--dir-q-low", type=float, default=0.33)
-    parser.add_argument("--dir-q-high", type=float, default=0.67)
     parser.add_argument(
         "--dir-head-hidden",
         type=int,

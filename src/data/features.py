@@ -186,8 +186,9 @@ def make_direction_labels(
         No quantile thresholds are computed or used.  This eliminates the
         distribution-shift problem where training quantile thresholds produce
         heavily imbalanced (60-70 % neutral) classes at test time.  With a
-        5-day forward horizon and momentum features, binary accuracy ≥ 65 % is
-        achievable (MAE < 0.35).
+        A 5-day forward horizon is less noisy than 1-day direction, but binary
+        SPY direction remains difficult and should be evaluated against majority
+        and walk-forward baselines.
 
     **Three-class (n_classes=3):**
         Bear = below q_low quantile of training returns.

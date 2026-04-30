@@ -44,15 +44,12 @@ class TransformerConfig:
     :param gate_beta: temperature for MASTER softmax gate (softmax(linear/beta))
     :param gate_mode: MASTER or CROSS_ATTN gating variant
     :param readout_mode: LAST, MEAN, or ATTN_POOL temporal pooling
-    :param use_pre_tanh_z: if True, downstream RL uses z_pre instead of z
     :param n_dir_classes: direction head classes (2 = binary Up/Down, default;
                            3 = Bear/Neutral/Bull, legacy — suffers quantile drift)
     :param n_reg_classes: regime head classes (GHMM states; BIC selects K=4)
-    :param lambda_dir: loss weight on direction cross-entropy (focal)
+    :param lambda_dir: loss weight on direction cross-entropy
     :param lambda_reg: loss weight on regime cross-entropy
     :param dir_label_smoothing: label smoothing ε for direction cross-entropy (0 = disabled)
-    :param dir_q_low: lower quantile of train returns defining neutral band for direction labels
-    :param dir_q_high: upper quantile of train returns defining neutral band for direction labels
     :param dir_head_hidden: hidden dim for the two-layer direction MLP head (0 = linear only)
     """
     # 16 price/tech features:
@@ -79,7 +76,6 @@ class TransformerConfig:
     gate_beta: float = 1.0
     gate_mode: GateMode = GateMode.CROSS_ATTN
     readout_mode: ReadoutMode = ReadoutMode.ATTN_POOL
-    use_pre_tanh_z: bool = False  # if true, RL obs uses z_pre instead of z
 
     # Binary direction (2) is the default.  The 3-class (Bear/Neutral/Bull)
     # approach suffers from quantile-threshold distribution shift between
@@ -100,16 +96,10 @@ class TransformerConfig:
     # failing direction head, making optimisation harder with no benefit at this stage.
     dir_label_smoothing: float = 0.0
 
-    # Widened neutral band 40/60 → 33/67 to produce balanced 33/33/33 direction classes.
-    # The original 40/60 split left neutral as a 20% minority with no class weighting,
-    # causing the direction head to ignore it entirely.
-    dir_q_low: float = 0.33
-    dir_q_high: float = 0.67
-
     # Two-layer MLP direction head; 0 = single linear (disabled).
     dir_head_hidden: int = 32
 
-    # When True, direction and return heads bypass the 16-dim bottleneck and read
+    # When True, the direction head bypasses the 16-dim bottleneck and reads
     # directly from h_pooled (64-dim).  The tanh activation was already removed from
     # the bottleneck (fixing gradient saturation), but the linear 64→16 projection
     # still discards information.  Task-specific heads give dir/ret 4× more capacity
