@@ -160,6 +160,16 @@ class MarketTransformer(nn.Module):
                 weight=targets.get("dir_weights"),
                 label_smoothing=cfg.dir_label_smoothing,
             )
+
+        # Entropy regularisation — maximise prediction entropy to prevent mode
+        # collapse (e.g. always predicting neutral).  Subtracting the mean entropy
+        # of the direction distribution encourages the head to spread probability
+        # mass across classes rather than concentrating on the majority class.
+        if cfg.dir_entropy_coeff > 0:
+            dir_probs = F.softmax(out["dir_logits"], dim=-1).clamp(min=1e-8)
+            dir_entropy = -(dir_probs * dir_probs.log()).sum(dim=-1).mean()
+            dir_loss = dir_loss - cfg.dir_entropy_coeff * dir_entropy
+
         reg_loss = F.cross_entropy(out["reg_logits"], targets["y_reg"])
         ret_loss = F.huber_loss(out["ret_pred"].squeeze(-1), targets["y_ret_std"].float())
 

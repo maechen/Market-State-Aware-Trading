@@ -148,6 +148,7 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         dir_head_hidden=args.dir_head_hidden,
         use_task_specific_heads=args.use_task_specific_heads,
         focal_gamma=args.focal_gamma,
+        dir_entropy_coeff=args.dir_entropy_coeff,
     )
 
 
@@ -878,7 +879,8 @@ def parse_args(
 
     # Model / labels
     parser.add_argument("--window-size", type=int, default=20)
-    parser.add_argument("--d-feat", type=int, default=7)
+    parser.add_argument("--d-feat", type=int, default=11,
+                        help="Price/tech feature channels (6 scaled + 1 RSI + 4 regime_prob).")
     parser.add_argument("--d-sent", type=int, default=3)
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--d-ff", type=int, default=128)
@@ -921,6 +923,15 @@ def parse_args(
         type=float,
         default=2.0,
         help="Focal loss exponent γ for direction head; 0 = standard cross-entropy.",
+    )
+    parser.add_argument(
+        "--dir-entropy-coeff",
+        type=float,
+        default=0.1,
+        help=(
+            "Entropy regularisation weight for direction head (0 = disabled). "
+            "Subtracts coeff*H(softmax(logits)) from dir_loss to prevent mode collapse."
+        ),
     )
     parser.add_argument(
         "--use-task-specific-heads",

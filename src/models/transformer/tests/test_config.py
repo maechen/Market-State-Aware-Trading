@@ -140,3 +140,20 @@ def test_dir_label_smoothing_default():
     """Label smoothing disabled by default to avoid raising the loss floor."""
     cfg = TransformerConfig()
     assert cfg.dir_label_smoothing == 0.0
+
+
+def test_dir_entropy_coeff_default():
+    """Entropy regularisation defaults to 0.1 to prevent direction mode collapse."""
+    cfg = TransformerConfig()
+    assert cfg.dir_entropy_coeff == 0.1
+
+
+def test_dir_entropy_coeff_can_be_disabled():
+    cfg = TransformerConfig(dir_entropy_coeff=0.0)
+    assert cfg.dir_entropy_coeff == 0.0
+
+
+def test_d_feat_default_includes_regime_probs():
+    """d_feat=11: 6 scaled + 1 RSI + 4 regime_prob pass-through."""
+    cfg = TransformerConfig()
+    assert cfg.d_feat == 11

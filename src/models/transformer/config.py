@@ -55,7 +55,10 @@ class TransformerConfig:
     :param dir_q_high: upper quantile of train returns defining neutral band for direction labels
     :param dir_head_hidden: hidden dim for the two-layer direction MLP head (0 = linear only)
     """
-    d_feat: int = 7
+    # 11 price/tech features: 6 z-scored + 1 RSI-norm + 4 regime_prob pass-through
+    # (up from 7; the 4 HMM posterior probabilities are added as price/tech features
+    #  so CrossAttentionGate can learn regime-conditioned price representations)
+    d_feat: int = 11
     d_sent: int = 3
     window_size: int = 30
 
@@ -111,3 +114,10 @@ class TransformerConfig:
     # very close to the neutral-band thresholds) and focuses gradients on harder,
     # more clearly-labelled examples.
     focal_gamma: float = 2.0
+
+    # Entropy regularisation coefficient for the direction head.
+    # Subtracts `dir_entropy_coeff * H(softmax(dir_logits))` from dir_loss to
+    # MAXIMISE prediction entropy, preventing the head from collapsing to always
+    # predicting the same class (mode collapse).  Empirically 0.05–0.15 is a good
+    # range; set to 0.0 to disable.
+    dir_entropy_coeff: float = 0.1

@@ -1,17 +1,31 @@
 """
 Feature engineering pipeline for the MarketTransformer.
 
-Three-tier normalization strategy (from implementation plan V2, C9):
+Four-tier normalization strategy:
     1. Unbounded (log_return, rolling_vol_20, macd, relative MA distances):
        StandardScaler fit on training fold only.
     2. Bounded [0, 100] (rsi_14): divide by 100 → [0, 1]; no further scaling.
-    3. Probability simplex (Negative, Neutral, Positive): pass-through.
+    3. Probability simplex — regime_prob_0..3 (HMM posterior) and
+       Negative/Neutral/Positive (sentiment): pass-through as-is.
 
-Final feature vector (10 dimensions in FEATURE_ORDER):
-    [log_return, rolling_vol_20, macd,
-     close_to_ma10, close_to_ma20, ma10_to_ma50,
-     rsi_norm,
-     Negative, Neutral, Positive]
+Final feature vector (14 dimensions in FEATURE_ORDER):
+    Price/tech — first d_feat=11 columns (fed to CrossAttentionGate as K/V):
+        [log_return, rolling_vol_20, macd,
+         close_to_ma10, close_to_ma20, ma10_to_ma50,
+         rsi_norm,
+         regime_prob_0, regime_prob_1, regime_prob_2, regime_prob_3]
+
+    Sentiment — last d_sent=3 columns (fed to CrossAttentionGate as Q):
+        [Negative, Neutral, Positive]
+
+Rationale for regime_prob inclusion:
+    The HMM posterior probabilities capture high-level market state (crash,
+    recovery, bull, high-vol) not fully encoded by individual technical
+    indicators.  Regime state has strong directional predictability: crash
+    regime → predominantly bear days; bull regime → predominantly bull days.
+    Including them as price/tech features lets the CrossAttentionGate learn
+    regime-conditioned price representations, directly addressing the gap
+    between regime accuracy (≥85 %) and direction accuracy.
 """
 
 from typing import Tuple
@@ -26,9 +40,13 @@ UNBOUNDED_COLS: list[str] = ["log_return", "rolling_vol_20", "macd"]
 DERIVED_COLS: list[str] = ["close_to_ma10", "close_to_ma20", "ma10_to_ma50"]
 SCALE_COLS: list[str] = UNBOUNDED_COLS + DERIVED_COLS  # 6 z-scored columns
 RSI_COL: str = "rsi_norm"
+REGIME_PROB_COLS: list[str] = [
+    "regime_prob_0", "regime_prob_1", "regime_prob_2", "regime_prob_3"
+]
 SENT_COLS: list[str] = ["Negative", "Neutral", "Positive"]
 
-FEATURE_ORDER: list[str] = SCALE_COLS + [RSI_COL] + SENT_COLS  # length = 10
+# 14 total: 11 price/tech (d_feat) + 3 sentiment (d_sent)
+FEATURE_ORDER: list[str] = SCALE_COLS + [RSI_COL] + REGIME_PROB_COLS + SENT_COLS
 
 
 # ── Feature derivation ────────────────────────────────────────────────────────
@@ -66,20 +84,21 @@ def fit_scaler(train_df: pd.DataFrame) -> StandardScaler:
 
 def apply_normalization(df: pd.DataFrame, scaler: StandardScaler) -> np.ndarray:
     """
-    Applies the three-tier normalization and returns a float32 array of shape
-    (n_rows, 10) in FEATURE_ORDER.
+    Applies the four-tier normalization and returns a float32 array of shape
+    (n_rows, 14) in FEATURE_ORDER.
 
     Args:
         df     : raw fold DataFrame (with original CSV columns)
         scaler : StandardScaler fitted on the training fold
     Returns:
-        numpy array of shape (n_rows, 10), dtype float32
+        numpy array of shape (n_rows, 14), dtype float32
     """
     derived = derive_features(df)
     scaled = scaler.transform(derived[SCALE_COLS].values)   # (n, 6)  z-scored
     rsi = derived["rsi_norm"].values.reshape(-1, 1)          # (n, 1)  [0, 1]
-    sent = df[SENT_COLS].values                              # (n, 3)  pass-through
-    return np.concatenate([scaled, rsi, sent], axis=1).astype(np.float32)
+    regime = df[REGIME_PROB_COLS].values                     # (n, 4)  pass-through [0,1]
+    sent = df[SENT_COLS].values                              # (n, 3)  pass-through [0,1]
+    return np.concatenate([scaled, rsi, regime, sent], axis=1).astype(np.float32)
 
 
 # ── Direction labels ──────────────────────────────────────────────────────────

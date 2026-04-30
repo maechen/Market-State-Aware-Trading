@@ -19,6 +19,7 @@ from .features import (
     derive_features,
     fit_scaler,
     make_direction_labels,
+    REGIME_PROB_COLS,
     SENT_COLS,
     UNBOUNDED_COLS,
     standardize_returns,
@@ -31,12 +32,13 @@ def _required_raw_columns() -> list[str]:
     Derived feature prerequisites come from `derive_features()` and the base
     unbounded feature columns from `UNBOUNDED_COLS`.
     Sentiment columns come from `SENT_COLS`.
+    Regime probability columns (HMM posterior) come from `REGIME_PROB_COLS`.
     Regime labels are required for the multitask head target.
     """
     # derive_features prerequisites
     derived_prereqs = ["Adj Close", "ma_10", "ma_20", "ma_50", "rsi_14"]
-    # feature inputs used by scaling + sentiment pass-through
-    feature_inputs = list(UNBOUNDED_COLS) + list(SENT_COLS)
+    # feature inputs: price/tech (unbounded) + regime probs + sentiment
+    feature_inputs = list(UNBOUNDED_COLS) + list(REGIME_PROB_COLS) + list(SENT_COLS)
     # supervised labels
     label_inputs = ["regime_label", "log_return"]
     # de-duplicate while preserving order
