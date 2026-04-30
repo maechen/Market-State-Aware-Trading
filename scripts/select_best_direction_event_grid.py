@@ -30,7 +30,11 @@ for fm in sorted(base.glob('k*_h*/fold_metrics.csv')):
       'val_up_rate': wavg(df['val_dir_up_rate_event'], df['val_dir_event_count']),
       'test_up_rate': wavg(df['test_dir_up_rate_event'], df['test_dir_event_count']),
     }
-    row['eligible']= bool(row['val_coverage_weighted']>=0.40 and row['val_acc_minus_majority_weighted']>0 and 0.35<=row['val_up_rate']<=0.65 and 0.35<=row['test_up_rate']<=0.65)
+    row["eligible"] = bool(
+        row["val_coverage_weighted"] >= 0.40
+        and row["val_acc_minus_majority_weighted"] > 0
+        and 0.35 <= row["val_up_rate"] <= 0.65
+    )
     rows.append(row)
 out=pd.DataFrame(rows)
 out['rank']=np.nan
