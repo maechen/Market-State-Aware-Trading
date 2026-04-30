@@ -1,6 +1,5 @@
 """Tests for the Bottleneck module."""
 
-import pytest
 import torch
 from src.models.transformer.bottleneck import Bottleneck
 
@@ -25,36 +24,37 @@ def test_bottleneck_z_pre_shape():
     assert z_pre.shape == (B, D_Z)
 
 
-def test_z_is_bounded_in_minus1_plus1():
-    """Post-Tanh output must lie strictly in (-1, 1)."""
-    bn = _make_bottleneck()
-    # Use large inputs to push z_pre to extreme values
-    h = torch.randn(B, D_MODEL) * 100.0
-    z, _ = bn(h)
-    assert (z >= -1.0).all() and (z <= 1.0).all()
-
-
-def test_z_equals_tanh_z_pre():
-    bn = _make_bottleneck()
-    h = torch.randn(B, D_MODEL)
-    z, z_pre = bn(h)
-    assert torch.allclose(z, torch.tanh(z_pre), atol=1e-6)
-
-
-def test_z_pre_can_exceed_tanh_bounds():
-    """z_pre should be able to take values outside [-1, 1]."""
-    bn = _make_bottleneck()
-    # With large inputs, z_pre should have values far from ±1
-    h = torch.randn(B, D_MODEL) * 100.0
-    _, z_pre = bn(h)
-    assert (z_pre.abs() > 1.0).any(), "z_pre should have values outside [-1, 1]"
-
-
 def test_bottleneck_returns_tuple_of_two():
     bn = _make_bottleneck()
     h = torch.randn(B, D_MODEL)
     result = bn(h)
     assert isinstance(result, tuple) and len(result) == 2
+
+
+def test_z_and_z_pre_are_identical():
+    """Without tanh, z and z_pre are the same linear projection."""
+    bn = _make_bottleneck()
+    h = torch.randn(B, D_MODEL)
+    z, z_pre = bn(h)
+    assert torch.allclose(z, z_pre), "z and z_pre should be identical (no activation)"
+
+
+def test_z_equals_linear_of_h():
+    """z must be exactly the linear projection of h (no activation applied)."""
+    bn = _make_bottleneck()
+    h = torch.randn(B, D_MODEL)
+    z, _ = bn(h)
+    with torch.no_grad():
+        expected = bn.linear(h)
+    assert torch.allclose(z, expected, atol=1e-6)
+
+
+def test_z_is_unbounded():
+    """Without tanh the projection can take values outside [-1, 1]."""
+    bn = _make_bottleneck()
+    h = torch.randn(B, D_MODEL) * 100.0
+    z, _ = bn(h)
+    assert (z.abs() > 1.0).any(), "z should have values outside [-1, 1] for large inputs"
 
 
 def test_bottleneck_gradient_flows_through_z():

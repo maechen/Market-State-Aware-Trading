@@ -89,11 +89,18 @@ class CrossAttentionGate(nn.Module):
     def forward(self, price_tech: torch.Tensor, sent_seq: torch.Tensor) -> torch.Tensor:
         """
         Reweight price/tech features at every timestep using sentiment queries.
+
+        A residual connection from the projected price/tech features (KV) is added
+        to the cross-attention output so that the transformer stack always receives
+        the raw price/tech signal regardless of whether the sentiment attention is
+        informative.  Without this skip path, noisy or uninformative sentiment can
+        erase the original price representation, which harms regime classification.
+
         :param price_tech: tensor (batch, W, d_feat) — price and technical features
         :param sent_seq:   tensor (batch, W, d_sent) — sentiment scores for every timestep
         :return: tensor (batch, W, d_model) — sentiment-reweighted price representation
         """
-        Q = self.q_proj(sent_seq)                          # (B, W, d_model)
-        KV = self.kv_proj(price_tech)                      # (B, W, d_model)
-        reweighted, _ = self.mha(Q, KV, KV, need_weights=False)  # (B, W, d_model)
-        return reweighted
+        Q = self.q_proj(sent_seq)                                  # (B, W, d_model)
+        KV = self.kv_proj(price_tech)                              # (B, W, d_model)
+        reweighted, _ = self.mha(Q, KV, KV, need_weights=False)   # (B, W, d_model)
+        return reweighted + KV  # residual: preserve direct price/tech projection

@@ -146,6 +146,8 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         dir_q_low=args.dir_q_low,
         dir_q_high=args.dir_q_high,
         dir_head_hidden=args.dir_head_hidden,
+        use_task_specific_heads=args.use_task_specific_heads,
+        focal_gamma=args.focal_gamma,
     )
 
 
@@ -182,6 +184,7 @@ def _run_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     max_batches: int | None = None,
     dir_class_weights: torch.Tensor | None = None,
+    grad_clip: float = 1.0,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -235,6 +238,8 @@ def _run_epoch(
                 )
             if is_train:
                 loss.backward()
+                if grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
         batch_size = int(x.shape[0])
@@ -263,6 +268,99 @@ def _run_epoch(
         "reg_acc": totals["reg_correct"] / n,
         "num_samples": float(totals["num_samples"]),
     }
+
+
+def _collect_split_predictions(
+    model: MarketTransformer,
+    dataloader: DataLoader,
+    device: torch.device,
+    variant: str,
+    d_feat: int,
+) -> dict[str, np.ndarray]:
+    """
+    Collect per-sample predictions/targets for a split in dataloader order.
+
+    Returns:
+        dict with y_dir_true/y_dir_pred/y_reg_true/y_reg_pred/y_ret_true/y_ret_pred.
+    """
+    model.eval()
+    y_dir_true: list[np.ndarray] = []
+    y_dir_pred: list[np.ndarray] = []
+    y_reg_true: list[np.ndarray] = []
+    y_reg_pred: list[np.ndarray] = []
+    y_ret_true: list[np.ndarray] = []
+    y_ret_pred: list[np.ndarray] = []
+
+    with torch.no_grad():
+        for x, y_dir, y_reg, y_ret in dataloader:
+            x = x.to(device, non_blocking=True)
+            x = _apply_variant_to_inputs(x, variant=variant, d_feat=d_feat)
+            out = model(x)
+
+            y_dir_true.append(y_dir.cpu().numpy().astype(np.int64))
+            y_dir_pred.append(out["dir_logits"].argmax(dim=1).cpu().numpy().astype(np.int64))
+            y_reg_true.append(y_reg.cpu().numpy().astype(np.int64))
+            y_reg_pred.append(out["reg_logits"].argmax(dim=1).cpu().numpy().astype(np.int64))
+            y_ret_true.append(y_ret.cpu().numpy().astype(np.float32))
+            y_ret_pred.append(out["ret_pred"].squeeze(-1).cpu().numpy().astype(np.float32))
+
+    def _concat_or_empty(parts: list[np.ndarray], dtype: np.dtype) -> np.ndarray:
+        if not parts:
+            return np.empty((0,), dtype=dtype)
+        return np.concatenate(parts, axis=0).astype(dtype)
+
+    return {
+        "y_dir_true": _concat_or_empty(y_dir_true, np.int64),
+        "y_dir_pred": _concat_or_empty(y_dir_pred, np.int64),
+        "y_reg_true": _concat_or_empty(y_reg_true, np.int64),
+        "y_reg_pred": _concat_or_empty(y_reg_pred, np.int64),
+        "y_ret_true_std": _concat_or_empty(y_ret_true, np.float32),
+        "y_ret_pred_std": _concat_or_empty(y_ret_pred, np.float32),
+    }
+
+
+def _export_test_predictions(
+    model: MarketTransformer,
+    test_loader: DataLoader,
+    fold_dir: Path,
+    output_dir: Path,
+    config: TransformerConfig,
+    variant: str,
+    device: torch.device,
+) -> int:
+    """
+    Save per-sample test targets and predictions for downstream diagnostics (e.g., MAE).
+    """
+    preds = _collect_split_predictions(
+        model=model,
+        dataloader=test_loader,
+        device=device,
+        variant=variant,
+        d_feat=config.d_feat,
+    )
+    n_samples = int(preds["y_dir_true"].shape[0])
+
+    split_dates = _load_split_dates(fold_dir=fold_dir)
+    # Dataset labels are aligned to window end indices [W-1, ..., n_rows-2], so drop final row.
+    aligned_dates = split_dates["test"][config.window_size - 1 : -1].to_numpy(dtype="datetime64[ns]")
+    if aligned_dates.shape[0] != n_samples:
+        raise RuntimeError(
+            f"Prediction/date mismatch for test split: {n_samples} vs {aligned_dates.shape[0]}"
+        )
+
+    pred_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(aligned_dates),
+            "y_dir_true": preds["y_dir_true"],
+            "y_dir_pred": preds["y_dir_pred"],
+            "y_reg_true": preds["y_reg_true"],
+            "y_reg_pred": preds["y_reg_pred"],
+            "y_ret_true_std": preds["y_ret_true_std"],
+            "y_ret_pred_std": preds["y_ret_pred_std"],
+        }
+    )
+    pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
+    return n_samples
 
 
 def _save_checkpoint(
@@ -493,6 +591,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             q_low=config.dir_q_low,
             q_high=config.dir_q_high,
             num_workers=args.num_workers,
+            shuffle_train=args.shuffle_train,
         )
 
         feature_dim = int(train_loader.dataset.features.shape[1])
@@ -508,9 +607,25 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             model.configure_optimizers(lr=args.lr, weight_decay=args.weight_decay),
             lr=args.lr,
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs, eta_min=1e-6
-        )
+        warmup_epochs = max(1, int(args.epochs * args.warmup_frac)) if args.warmup_frac > 0 else 0
+        if warmup_epochs > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+            )
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, args.epochs - warmup_epochs), eta_min=1e-6
+            )
+            scheduler: torch.optim.lr_scheduler.LRScheduler = (
+                torch.optim.lr_scheduler.SequentialLR(
+                    optimizer,
+                    schedulers=[warmup_scheduler, cosine_scheduler],
+                    milestones=[warmup_epochs],
+                )
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs, eta_min=1e-6
+            )
 
         # Compute per-class weights for the direction CE loss from training labels.
         # Inverse-frequency weighting compensates for the 40/20/40 (or 33/33/33)
@@ -540,6 +655,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 optimizer=optimizer,
                 max_batches=args.max_train_batches,
                 dir_class_weights=dir_class_weights,
+                grad_clip=args.grad_clip,
             )
             val_metrics = _run_epoch(
                 model=model,
@@ -640,6 +756,15 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             optimizer=None,
             max_batches=args.max_eval_batches,
         )
+        test_pred_rows = _export_test_predictions(
+            model=model,
+            test_loader=test_loader,
+            fold_dir=fold_dir,
+            output_dir=fold_output,
+            config=config,
+            variant=args.variant,
+            device=device,
+        )
 
         latent_counts = _export_fold_latents(
             model=model,
@@ -667,6 +792,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             "test_dir_acc": float(test_metrics["dir_acc"]),
             "test_reg_acc": float(test_metrics["reg_acc"]),
             "test_num_samples": int(test_metrics["num_samples"]),
+            "test_pred_rows": int(test_pred_rows),
             **latent_counts,
         }
 
@@ -778,9 +904,9 @@ def parse_args(
     )
     parser.add_argument("--n-dir-classes", type=int, default=3)
     parser.add_argument("--n-reg-classes", type=int, default=4)
-    parser.add_argument("--lambda-dir", type=float, default=0.5)
-    parser.add_argument("--lambda-reg", type=float, default=1.0)
-    parser.add_argument("--lambda-ret", type=float, default=0.3)
+    parser.add_argument("--lambda-dir", type=float, default=2.0)
+    parser.add_argument("--lambda-reg", type=float, default=0.3)
+    parser.add_argument("--lambda-ret", type=float, default=0.5)
     parser.add_argument("--dir-label-smoothing", type=float, default=0.0)
     parser.add_argument("--dir-q-low", type=float, default=0.33)
     parser.add_argument("--dir-q-high", type=float, default=0.67)
@@ -789,6 +915,43 @@ def parse_args(
         type=int,
         default=32,
         help="Hidden dim for two-layer direction MLP head; 0 = single linear.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focal loss exponent γ for direction head; 0 = standard cross-entropy.",
+    )
+    parser.add_argument(
+        "--use-task-specific-heads",
+        action="store_true",
+        default=True,
+        help="Direction and return heads read from h_pooled (bypass tanh bottleneck).",
+    )
+    parser.add_argument(
+        "--no-task-specific-heads",
+        dest="use_task_specific_heads",
+        action="store_false",
+        help="Revert direction/return heads to read from z (tanh bottleneck); backward-compat.",
+    )
+    parser.add_argument(
+        "--no-shuffle-train",
+        dest="shuffle_train",
+        action="store_false",
+        help="Disable shuffling of training windows (default: shuffled).",
+    )
+    parser.set_defaults(shuffle_train=True)
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Max gradient norm for clip_grad_norm_ (0 = disabled).",
+    )
+    parser.add_argument(
+        "--warmup-frac",
+        type=float,
+        default=0.05,
+        help="Fraction of total epochs used for linear LR warm-up (0 = no warmup).",
     )
 
     return parser.parse_args(argv)

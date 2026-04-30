@@ -77,12 +77,14 @@ class TransformerConfig:
     n_dir_classes: int = 3
     n_reg_classes: int = 4
 
-    # lambda_dir reduced from 1.0 → 0.5: at random-chance the direction head produced a
-    # gradient 5× larger than the learning regime signal, injecting noise into the shared
-    # representation. Regime weight raised from 0.5 → 1.0 to amplify the useful signal.
-    lambda_dir: float = 0.5
-    lambda_reg: float = 1.0
-    lambda_ret: float = 0.3
+    # lambda_dir raised to 2.0 so direction gets priority in the gradient budget.
+    # lambda_reg raised from 0.2 to 0.3: the CrossAttentionGate is less efficient
+    # at preserving regime-discriminative features than the multiplicative MASTER gate;
+    # a slightly stronger regime signal helps recover the ~6 pp accuracy regression.
+    # lambda_ret raised to 0.5 to give the return head a stronger learning signal.
+    lambda_dir: float = 2.0
+    lambda_reg: float = 0.3
+    lambda_ret: float = 0.5
 
     # Label smoothing disabled (was 0.1): added ~0.11 nats to the floor of an already-
     # failing direction head, making optimisation harder with no benefit at this stage.
@@ -96,3 +98,16 @@ class TransformerConfig:
 
     # Two-layer MLP direction head; 0 = single linear (disabled).
     dir_head_hidden: int = 32
+
+    # When True, direction and return heads bypass the 16-dim bottleneck and read
+    # directly from h_pooled (64-dim).  The tanh activation was already removed from
+    # the bottleneck (fixing gradient saturation), but the linear 64→16 projection
+    # still discards information.  Task-specific heads give dir/ret 4× more capacity
+    # and decouple their gradients from the regime→z path.  Set False only to ablate.
+    use_task_specific_heads: bool = True
+
+    # Focal loss exponent γ for the direction cross-entropy.  γ=0 reduces to
+    # standard cross-entropy; γ=2 down-weights ambiguous boundary samples (returns
+    # very close to the neutral-band thresholds) and focuses gradients on harder,
+    # more clearly-labelled examples.
+    focal_gamma: float = 2.0

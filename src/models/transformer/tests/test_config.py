@@ -95,9 +95,31 @@ def test_cross_attn_gate_mode_selectable():
 
 def test_lambda_defaults():
     cfg = TransformerConfig()
-    assert cfg.lambda_dir == 0.5
-    assert cfg.lambda_reg == 1.0
-    assert cfg.lambda_ret == 0.3
+    assert cfg.lambda_dir == 2.0
+    assert cfg.lambda_reg == 0.3
+    assert cfg.lambda_ret == 0.5
+
+
+def test_use_task_specific_heads_default():
+    """Direction and return heads bypass tanh bottleneck by default."""
+    cfg = TransformerConfig()
+    assert cfg.use_task_specific_heads is True
+
+
+def test_focal_gamma_default():
+    """Focal loss exponent defaults to 2.0 for direction head."""
+    cfg = TransformerConfig()
+    assert cfg.focal_gamma == 2.0
+
+
+def test_task_specific_heads_can_be_disabled():
+    cfg = TransformerConfig(use_task_specific_heads=False)
+    assert cfg.use_task_specific_heads is False
+
+
+def test_focal_gamma_zero_is_allowed():
+    cfg = TransformerConfig(focal_gamma=0.0)
+    assert cfg.focal_gamma == 0.0
 
 
 def test_dir_quantile_defaults():

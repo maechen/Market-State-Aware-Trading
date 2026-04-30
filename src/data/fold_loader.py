@@ -82,6 +82,7 @@ def get_fold_loaders(
     q_low: float = 0.40,
     q_high: float = 0.60,
     num_workers: int = 0,
+    shuffle_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Loads train/val/test CSVs from fold_dir, applies the full feature
@@ -91,11 +92,15 @@ def get_fold_loaders(
         fold_dir    : path to a directory containing
                       spy_train_labeled.csv, spy_val_labeled.csv,
                       spy_test_labeled.csv
-        window_size : W (lookback window)
-        batch_size  : DataLoader batch size
-        q_low       : lower quantile for direction neutral band
-        q_high      : upper quantile for direction neutral band
-        num_workers : DataLoader worker processes
+        window_size   : W (lookback window)
+        batch_size    : DataLoader batch size
+        q_low         : lower quantile for direction neutral band
+        q_high        : upper quantile for direction neutral band
+        num_workers   : DataLoader worker processes
+        shuffle_train : whether to shuffle the training DataLoader.  True
+                        (default) randomises batch order, decorrelating
+                        temporally-adjacent windows and improving gradient
+                        diversity for the direction and return heads.
 
     Returns:
         (train_loader, val_loader, test_loader)
@@ -183,7 +188,7 @@ def get_fold_loaders(
             )
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+        train_ds, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers

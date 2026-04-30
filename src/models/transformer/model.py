@@ -14,6 +14,33 @@ from .bottleneck import Bottleneck
 from .heads import DirectionHead, RegimeHead, ReturnHead
 
 
+def _focal_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    gamma: float = 2.0,
+    weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Focal cross-entropy: FL(p_t) = -(1 - p_t)^γ · log(p_t).
+
+    When γ=0 this is identical to standard cross-entropy.
+    When γ>0 easy examples (high p_t) receive a downscaled gradient, forcing
+    the model to focus on harder, more informative boundary samples.
+
+    :param logits:  (B, C) raw scores
+    :param targets: (B,) class indices
+    :param gamma:   focusing exponent (0 = standard CE, 2 = typical focal)
+    :param weight:  (C,) optional per-class weights applied before focal scaling
+    :return: scalar mean focal loss
+    """
+    log_probs = F.log_softmax(logits, dim=-1)
+    nll = F.nll_loss(log_probs, targets, weight=weight, reduction="none")
+    probs = log_probs.exp()
+    pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+    focal_weight = (1.0 - pt) ** gamma
+    return (focal_weight * nll).mean()
+
+
 class MarketTransformer(nn.Module):
     """
     end-to-end model from windowed features to latent z and three supervised predictions
@@ -43,11 +70,27 @@ class MarketTransformer(nn.Module):
         self.readout = TemporalReadout(config.d_model, config.readout_mode)
 
         self.bottleneck = Bottleneck(config.d_model, config.d_z)
-        self.dir_head = DirectionHead(
-            config.d_z, config.n_dir_classes, hidden=config.dir_head_hidden
-        )
+
+        # Regime head always reads from z (compact 16-dim linear projection of h_pooled).
+        # z is intentionally small so that DRL can use it as a low-dimensional state.
         self.reg_head = RegimeHead(config.d_z, config.n_reg_classes)
-        self.ret_head = ReturnHead(config.d_z)
+
+        if config.use_task_specific_heads:
+            # Direction and return heads read from h_pooled (d_model=64) rather than
+            # z (d_z=16).  Even though the bottleneck no longer applies tanh (removed
+            # to fix gradient saturation), the linear 64→16 projection still discards
+            # information.  Connecting dir/ret directly to h_pooled gives them 4× the
+            # representational capacity and avoids gradient interference with the
+            # regime→z path.
+            self.dir_head = DirectionHead(
+                config.d_model, config.n_dir_classes, hidden=config.dir_head_hidden
+            )
+            self.ret_head = ReturnHead(config.d_model)
+        else:
+            self.dir_head = DirectionHead(
+                config.d_z, config.n_dir_classes, hidden=config.dir_head_hidden
+            )
+            self.ret_head = ReturnHead(config.d_z)
 
     def forward(self, x: torch.Tensor) -> dict:
         """
@@ -75,12 +118,19 @@ class MarketTransformer(nn.Module):
         h_pooled = self.readout(h)
         z, z_pre = self.bottleneck(h_pooled)
 
+        if self.config.use_task_specific_heads:
+            dir_logits = self.dir_head(h_pooled)
+            ret_pred = self.ret_head(h_pooled)
+        else:
+            dir_logits = self.dir_head(z)
+            ret_pred = self.ret_head(z)
+
         return {
             "z": z,
             "z_pre": z_pre,
-            "dir_logits": self.dir_head(z),
+            "dir_logits": dir_logits,
             "reg_logits": self.reg_head(z),
-            "ret_pred": self.ret_head(z),
+            "ret_pred": ret_pred,
         }
 
     def compute_loss(
@@ -96,12 +146,20 @@ class MarketTransformer(nn.Module):
         """
         cfg = self.config
 
-        dir_loss = F.cross_entropy(
-            out["dir_logits"],
-            targets["y_dir"],
-            weight=targets.get("dir_weights"),
-            label_smoothing=cfg.dir_label_smoothing,
-        )
+        if cfg.focal_gamma > 0:
+            dir_loss = _focal_cross_entropy(
+                out["dir_logits"],
+                targets["y_dir"],
+                gamma=cfg.focal_gamma,
+                weight=targets.get("dir_weights"),
+            )
+        else:
+            dir_loss = F.cross_entropy(
+                out["dir_logits"],
+                targets["y_dir"],
+                weight=targets.get("dir_weights"),
+                label_smoothing=cfg.dir_label_smoothing,
+            )
         reg_loss = F.cross_entropy(out["reg_logits"], targets["y_reg"])
         ret_loss = F.huber_loss(out["ret_pred"].squeeze(-1), targets["y_ret_std"].float())
 
