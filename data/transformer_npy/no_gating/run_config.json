@@ -8,7 +8,7 @@
   "lr": 0.0001,
   "weight_decay": 0.0001,
   "seed": 42,
-  "device": "cuda",
+  "device": "mps",
   "checkpoint_every": 0,
   "max_train_batches": null,
   "max_eval_batches": null,
@@ -40,14 +40,12 @@
     "n_reg_classes": 4,
     "lambda_dir": 2.0,
     "lambda_reg": 0.3,
-    "lambda_ret": 0.2,
     "dir_label_smoothing": 0.0,
     "dir_q_low": 0.33,
     "dir_q_high": 0.67,
     "dir_head_hidden": 32,
     "use_task_specific_heads": true,
     "focal_gamma": 2.0,
-    "dir_entropy_coeff": 0.1,
-    "ret_var_coeff": 0.1
+    "dir_entropy_coeff": 0.3
   }
 }

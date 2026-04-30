@@ -1,10 +1,10 @@
 """
 transformer_diagnostics.py — Training effectiveness visualizations for MarketTransformer.
 
-Produces 7 publication-ready figures from a completed transformer run directory:
+Produces publication-ready figures from a completed transformer run directory:
 
   01_learning_curves.png        — Train/val total loss per fold with best-epoch marker
-  02_component_losses.png       — Per-component (dir/reg/ret) train vs val loss per fold
+  02_component_losses.png       — Per-component (dir/reg) train vs val loss per fold
   03_crossfold_test_metrics.png — Cross-fold bar chart of test accuracy and loss
   04_direction_accuracy.png     — Val direction accuracy vs epoch per fold (vs random baseline)
   05_regime_accuracy.png        — Val regime accuracy vs epoch per fold
@@ -31,7 +31,7 @@ FOLD_COLORS = [
     "#E63946", "#457B9D", "#2A9D8F", "#E9C46A",
     "#F4A261", "#264653", "#8338EC", "#FB5607",
 ]
-COMPONENT_COLORS = {"dir": "#E63946", "reg": "#2A9D8F", "ret": "#E9C46A"}
+COMPONENT_COLORS = {"dir": "#E63946", "reg": "#2A9D8F"}
 SPLIT_ALPHA = {"train": 0.45, "val": 1.0}
 
 plt.rcParams.update({
@@ -124,7 +124,7 @@ def plot_learning_curves(run_dir: Path, out_dir: Path) -> Path:
 # ── Figure 2: Per-fold component losses ───────────────────────────────────────
 
 def plot_component_losses(run_dir: Path, out_dir: Path) -> Path:
-    """Dir / reg / ret train and val loss curves per fold."""
+    """Direction/regime train and val loss curves per fold."""
     folds = _discover_folds(run_dir)
     n_folds = len(folds)
     n_cols = 4
@@ -137,7 +137,6 @@ def plot_component_losses(run_dir: Path, out_dir: Path) -> Path:
     legend_patches = [
         mpatches.Patch(color=COMPONENT_COLORS["dir"], label="Direction"),
         mpatches.Patch(color=COMPONENT_COLORS["reg"], label="Regime"),
-        mpatches.Patch(color=COMPONENT_COLORS["ret"], label="Return"),
     ]
 
     for ax_idx, fold_dir in enumerate(folds):
@@ -146,7 +145,7 @@ def plot_component_losses(run_dir: Path, out_dir: Path) -> Path:
         summary = _load_fold_summary(fold_dir)
         epochs = df["epoch"].values
 
-        for comp in ("dir", "reg", "ret"):
+        for comp in ("dir", "reg"):
             c = COMPONENT_COLORS[comp]
             ax.plot(epochs, df[f"train_{comp}_loss"], color=c, alpha=0.35, lw=1.2)
             ax.plot(epochs, df[f"val_{comp}_loss"], color=c, lw=1.8)
@@ -160,7 +159,7 @@ def plot_component_losses(run_dir: Path, out_dir: Path) -> Path:
     for ax in axes[n_folds:]:
         ax.set_visible(False)
 
-    fig.legend(handles=legend_patches, loc="lower right", fontsize=9, ncol=3,
+    fig.legend(handles=legend_patches, loc="lower right", fontsize=9, ncol=2,
                bbox_to_anchor=(1.0, 0.0))
     fig.tight_layout()
     out_path = out_dir / "02_component_losses.png"
@@ -187,7 +186,7 @@ def plot_crossfold_test_metrics(run_dir: Path, out_dir: Path) -> Path:
     ax_acc.bar(x - width / 2, dir_acc, width, color="#E63946", label="Direction Acc", zorder=3)
     ax_acc.bar(x + width / 2, reg_acc, width, color="#2A9D8F", label="Regime Acc", zorder=3)
     ax_acc.axhline(RANDOM_CHANCE_DIR * 100, color="#E63946", lw=1.5,
-                   linestyle="--", alpha=0.6, label="Dir random chance (33.3%)")
+                   linestyle="--", alpha=0.6, label="Dir random chance (50.0%)")
     ax_acc.set_xticks(x)
     ax_acc.set_xticklabels(folds, rotation=30, ha="right", fontsize=9)
     ax_acc.set_ylabel("Accuracy (%)", fontsize=10)
@@ -227,7 +226,7 @@ def plot_direction_accuracy(run_dir: Path, out_dir: Path) -> Path:
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.axhline(RANDOM_CHANCE_DIR * 100, color="black", lw=1.5, linestyle="--",
-               alpha=0.5, label="Random chance (33.3%)", zorder=2)
+               alpha=0.5, label="Random chance (50.0%)", zorder=2)
 
     for ax_idx, fold_dir in enumerate(folds):
         df = _load_epoch_metrics(fold_dir)
