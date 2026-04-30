@@ -8,7 +8,6 @@ from src.data.features import (
     fit_scaler,
     apply_normalization,
     make_direction_labels,
-    standardize_returns,
     FEATURE_ORDER,
     SCALE_COLS,
     SENT_COLS,
@@ -18,11 +17,14 @@ from src.data.features import (
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def _make_raw_df(n: int = 100, seed: int = 0) -> pd.DataFrame:
-    """Minimal DataFrame matching the training CSV schema."""
+    """Minimal DataFrame matching the training CSV schema (includes OHLCV for new momentum features)."""
     rng = np.random.default_rng(seed)
     close = 100 + np.cumsum(rng.normal(0, 1, n))
     df = pd.DataFrame({
         "Adj Close": close,
+        "High": close * rng.uniform(1.00, 1.02, n),
+        "Low": close * rng.uniform(0.98, 1.00, n),
+        "Volume": rng.uniform(1e6, 1e8, n),
         "log_return": rng.normal(0, 0.01, n),
         "rolling_vol_20": rng.uniform(0.005, 0.02, n),
         "rsi_14": rng.uniform(20, 80, n),
@@ -32,6 +34,10 @@ def _make_raw_df(n: int = 100, seed: int = 0) -> pd.DataFrame:
         "ma_20": close * rng.uniform(0.97, 1.03, n),
         "ma_50": close * rng.uniform(0.95, 1.05, n),
         "regime_label": rng.integers(0, 4, n),
+        "regime_prob_0": rng.uniform(0, 1, n),
+        "regime_prob_1": rng.uniform(0, 1, n),
+        "regime_prob_2": rng.uniform(0, 1, n),
+        "regime_prob_3": rng.uniform(0, 1, n),
         "Negative": rng.dirichlet(np.ones(3), n)[:, 0],
         "Neutral": rng.dirichlet(np.ones(3), n)[:, 1],
         "Positive": rng.dirichlet(np.ones(3), n)[:, 2],
@@ -109,7 +115,7 @@ def test_apply_normalization_output_shape():
     derived = derive_features(df)
     scaler = fit_scaler(derived)
     out = apply_normalization(df, scaler)
-    assert out.shape == (100, 10)
+    assert out.shape == (100, 19)
 
 
 def test_apply_normalization_dtype_float32():
@@ -161,22 +167,42 @@ def test_scaler_fit_only_on_train():
 
 # ── make_direction_labels ─────────────────────────────────────────────────────
 
-def test_make_direction_labels_returns_valid_classes():
+def test_make_direction_labels_binary_returns_valid_classes():
+    """Default mode (n_classes=2) should return only 0 (Down) or 1 (Up)."""
     rng = np.random.default_rng(0)
     train_ret = rng.normal(0, 0.01, 500)
     eval_ret = rng.normal(0, 0.01, 100)
     labels, lo, hi = make_direction_labels(train_ret, eval_ret)
+    assert set(labels).issubset({0, 1})
+
+
+def test_make_direction_labels_binary_extreme_values():
+    """Binary mode: clearly negative return → 0, clearly positive → 1."""
+    rng = np.random.default_rng(0)
+    train_ret = rng.normal(0, 0.01, 500)
+    eval_ret = np.array([-1.0, 1.0])
+    labels, lo, hi = make_direction_labels(train_ret, eval_ret)
+    assert labels[0] == 0   # clearly Down
+    assert labels[1] == 1   # clearly Up
+
+
+def test_make_direction_labels_three_class_returns_valid_classes():
+    """3-class mode should return only {0, 1, 2}."""
+    rng = np.random.default_rng(0)
+    train_ret = rng.normal(0, 0.01, 500)
+    eval_ret = rng.normal(0, 0.01, 100)
+    labels, lo, hi = make_direction_labels(train_ret, eval_ret, n_classes=3)
     assert set(labels).issubset({0, 1, 2})
 
 
 def test_make_direction_labels_neutral_proportion_approx_20pct():
     """
     With q_low=0.40, q_high=0.60, ~20% of training returns should be Neutral
-    when thresholds are applied back to the training set.
+    when thresholds are applied back to the training set (3-class mode only).
     """
     rng = np.random.default_rng(0)
     train_ret = rng.normal(0, 0.01, 1000)
-    labels, lo, hi = make_direction_labels(train_ret, train_ret)
+    labels, lo, hi = make_direction_labels(train_ret, train_ret, n_classes=3)
     neutral_frac = (labels == 1).mean()
     assert 0.15 <= neutral_frac <= 0.25, f"Neutral fraction {neutral_frac:.2f} outside [0.15, 0.25]"
 
@@ -185,19 +211,30 @@ def test_make_direction_labels_thresholds_from_train():
     rng = np.random.default_rng(0)
     train_ret = rng.normal(0, 0.01, 500)
     eval_ret = np.array([-1.0, 0.0, 1.0])
-    labels, lo, hi = make_direction_labels(train_ret, eval_ret)
+    labels, lo, hi = make_direction_labels(train_ret, eval_ret, n_classes=3)
     assert labels[0] == 0   # clearly Bear
     assert labels[2] == 2   # clearly Bull
 
 
-def test_make_direction_labels_returns_lo_hi():
+def test_make_direction_labels_three_class_returns_lo_hi():
+    """3-class mode must return quantile thresholds lo < hi."""
     rng = np.random.default_rng(0)
     train_ret = rng.normal(0, 0.01, 500)
     eval_ret = rng.normal(0, 0.01, 100)
-    labels, lo, hi = make_direction_labels(train_ret, eval_ret)
+    labels, lo, hi = make_direction_labels(train_ret, eval_ret, n_classes=3)
     assert lo < hi
     assert lo == np.quantile(train_ret, 0.40)
     assert hi == np.quantile(train_ret, 0.60)
+
+
+def test_make_direction_labels_binary_lo_hi_are_zero():
+    """Binary mode uses zero threshold; lo=hi=0.0."""
+    rng = np.random.default_rng(0)
+    train_ret = rng.normal(0, 0.01, 500)
+    eval_ret = rng.normal(0, 0.01, 100)
+    labels, lo, hi = make_direction_labels(train_ret, eval_ret, n_classes=2)
+    assert lo == 0.0
+    assert hi == 0.0
 
 
 def test_make_direction_labels_dtype_is_int():
@@ -207,31 +244,3 @@ def test_make_direction_labels_dtype_is_int():
     assert labels.dtype in (np.int32, np.int64)
 
 
-# ── standardize_returns ───────────────────────────────────────────────────────
-
-def test_standardize_returns_shape():
-    rng = np.random.default_rng(0)
-    train_ret = rng.normal(0, 0.01, 200)
-    result, mean, std = standardize_returns(train_ret, train_ret)
-    assert result.shape == train_ret.shape
-
-
-def test_standardize_returns_train_approx_zero_mean():
-    rng = np.random.default_rng(0)
-    train_ret = rng.normal(0.001, 0.01, 1000)
-    result, _, _ = standardize_returns(train_ret, train_ret)
-    assert abs(result.mean()) < 0.05
-
-
-def test_standardize_returns_train_approx_unit_std():
-    rng = np.random.default_rng(0)
-    train_ret = rng.normal(0, 0.01, 1000)
-    result, _, _ = standardize_returns(train_ret, train_ret)
-    assert abs(result.std() - 1.0) < 0.05
-
-
-def test_standardize_returns_dtype_float32():
-    rng = np.random.default_rng(0)
-    train_ret = rng.normal(0, 0.01, 200)
-    result, _, _ = standardize_returns(train_ret, train_ret)
-    assert result.dtype == np.float32

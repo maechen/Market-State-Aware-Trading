@@ -48,9 +48,8 @@ class TransformerConfig:
     :param n_dir_classes: direction head classes (2 = binary Up/Down, default;
                            3 = Bear/Neutral/Bull, legacy — suffers quantile drift)
     :param n_reg_classes: regime head classes (GHMM states; BIC selects K=4)
-    :param lambda_dir: loss weight on direction cross-entropy
+    :param lambda_dir: loss weight on direction cross-entropy (focal)
     :param lambda_reg: loss weight on regime cross-entropy
-    :param lambda_ret: loss weight on Quantile (pinball, τ=0.5) return regression
     :param dir_label_smoothing: label smoothing ε for direction cross-entropy (0 = disabled)
     :param dir_q_low: lower quantile of train returns defining neutral band for direction labels
     :param dir_q_high: upper quantile of train returns defining neutral band for direction labels
@@ -90,17 +89,12 @@ class TransformerConfig:
     n_dir_classes: int = 2
     n_reg_classes: int = 4
 
-    # lambda_dir raised to 2.0 so direction gets priority in the gradient budget.
-    # lambda_reg raised from 0.2 to 0.3: the CrossAttentionGate is less efficient
-    # at preserving regime-discriminative features than the multiplicative MASTER gate;
-    # a slightly stronger regime signal helps recover the ~6 pp accuracy regression.
-    # lambda_ret reduced to 0.2: the 20-day return target is genuinely noisier than
-    # direction/regime, so its gradient contribution is capped to avoid polluting the
-    # shared encoder.  The return head still provides an auxiliary regularising signal
-    # that shapes the latent space toward return-relevant features (SOTA: arxiv:2411.01456).
+    # Loss = λ_dir × focal_CE(direction) + λ_reg × CE(regime).
+    # λ_dir=2.0 gives direction priority in the gradient budget.
+    # λ_reg=0.3: the CrossAttentionGate is slightly less efficient at preserving
+    # regime-discriminative features than the multiplicative MASTER gate.
     lambda_dir: float = 2.0
     lambda_reg: float = 0.3
-    lambda_ret: float = 0.2
 
     # Label smoothing disabled (was 0.1): added ~0.11 nats to the floor of an already-
     # failing direction head, making optimisation harder with no benefit at this stage.
@@ -138,9 +132,3 @@ class TransformerConfig:
     # from collapsing; 0.1 was insufficient, 0.3 empirically resolves fold5/7/8.
     dir_entropy_coeff: float = 0.3
 
-    # Return head: variance regularisation coefficient.
-    # Adds `ret_var_coeff * ReLU(0.3 - std(ret_pred))` to ret_loss to penalise
-    # near-constant predictions and encourage the return head to spread its
-    # outputs.  The threshold 0.3 is relative to standardised scale (≈ 0.3σ).
-    # Set to 0.0 to disable.
-    ret_var_coeff: float = 0.1

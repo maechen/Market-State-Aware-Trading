@@ -141,7 +141,6 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         n_reg_classes=args.n_reg_classes,
         lambda_dir=args.lambda_dir,
         lambda_reg=args.lambda_reg,
-        lambda_ret=args.lambda_ret,
         dir_label_smoothing=args.dir_label_smoothing,
         dir_q_low=args.dir_q_low,
         dir_q_high=args.dir_q_high,
@@ -149,7 +148,6 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         use_task_specific_heads=args.use_task_specific_heads,
         focal_gamma=args.focal_gamma,
         dir_entropy_coeff=args.dir_entropy_coeff,
-        ret_var_coeff=args.ret_var_coeff,
     )
 
 
@@ -195,13 +193,12 @@ def _run_epoch(
         "total_loss": 0.0,
         "dir_loss": 0.0,
         "reg_loss": 0.0,
-        "ret_loss": 0.0,
         "dir_correct": 0.0,
         "reg_correct": 0.0,
         "num_samples": 0,
     }
 
-    for batch_idx, (x, y_dir, y_reg, y_ret) in enumerate(dataloader):
+    for batch_idx, (x, y_dir, y_reg) in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
             break
 
@@ -211,19 +208,9 @@ def _run_epoch(
             raise ValueError(
                 f"Non-finite values detected in input batch at index {batch_idx}."
             )
-        y_ret_f32 = y_ret.to(dtype=torch.float32)
-        if not torch.isfinite(y_ret_f32).all():
-            n_bad = int((~torch.isfinite(y_ret_f32)).sum())
-            print(
-                f"[Warning] {n_bad} non-finite return target(s) in batch {batch_idx}; "
-                "clamping to 0.",
-                flush=True,
-            )
-            y_ret_f32 = torch.nan_to_num(y_ret_f32, nan=0.0, posinf=0.0, neginf=0.0)
         targets: dict[str, Any] = {
             "y_dir": y_dir.to(device=device, dtype=torch.long, non_blocking=True),
             "y_reg": y_reg.to(device=device, dtype=torch.long, non_blocking=True),
-            "y_ret_std": y_ret_f32.to(device=device, non_blocking=True),
         }
         if dir_class_weights is not None:
             targets["dir_weights"] = dir_class_weights
@@ -249,7 +236,6 @@ def _run_epoch(
         totals["total_loss"] += info["total_loss"] * batch_size
         totals["dir_loss"] += info["dir_loss"] * batch_size
         totals["reg_loss"] += info["reg_loss"] * batch_size
-        totals["ret_loss"] += info["ret_loss"] * batch_size
         totals["dir_correct"] += (
             (out["dir_logits"].argmax(dim=1) == targets["y_dir"]).sum().item()
         )
@@ -265,7 +251,6 @@ def _run_epoch(
         "total_loss": totals["total_loss"] / n,
         "dir_loss": totals["dir_loss"] / n,
         "reg_loss": totals["reg_loss"] / n,
-        "ret_loss": totals["ret_loss"] / n,
         "dir_acc": totals["dir_correct"] / n,
         "reg_acc": totals["reg_correct"] / n,
         "num_samples": float(totals["num_samples"]),
@@ -283,18 +268,16 @@ def _collect_split_predictions(
     Collect per-sample predictions/targets for a split in dataloader order.
 
     Returns:
-        dict with y_dir_true/y_dir_pred/y_reg_true/y_reg_pred/y_ret_true/y_ret_pred.
+        dict with y_dir_true, y_dir_pred, y_reg_true, y_reg_pred.
     """
     model.eval()
     y_dir_true: list[np.ndarray] = []
     y_dir_pred: list[np.ndarray] = []
     y_reg_true: list[np.ndarray] = []
     y_reg_pred: list[np.ndarray] = []
-    y_ret_true: list[np.ndarray] = []
-    y_ret_pred: list[np.ndarray] = []
 
     with torch.no_grad():
-        for x, y_dir, y_reg, y_ret in dataloader:
+        for x, y_dir, y_reg in dataloader:
             x = x.to(device, non_blocking=True)
             x = _apply_variant_to_inputs(x, variant=variant, d_feat=d_feat)
             out = model(x)
@@ -303,8 +286,6 @@ def _collect_split_predictions(
             y_dir_pred.append(out["dir_logits"].argmax(dim=1).cpu().numpy().astype(np.int64))
             y_reg_true.append(y_reg.cpu().numpy().astype(np.int64))
             y_reg_pred.append(out["reg_logits"].argmax(dim=1).cpu().numpy().astype(np.int64))
-            y_ret_true.append(y_ret.cpu().numpy().astype(np.float32))
-            y_ret_pred.append(out["ret_pred"].squeeze(-1).cpu().numpy().astype(np.float32))
 
     def _concat_or_empty(parts: list[np.ndarray], dtype: np.dtype) -> np.ndarray:
         if not parts:
@@ -316,8 +297,6 @@ def _collect_split_predictions(
         "y_dir_pred": _concat_or_empty(y_dir_pred, np.int64),
         "y_reg_true": _concat_or_empty(y_reg_true, np.int64),
         "y_reg_pred": _concat_or_empty(y_reg_pred, np.int64),
-        "y_ret_true_std": _concat_or_empty(y_ret_true, np.float32),
-        "y_ret_pred_std": _concat_or_empty(y_ret_pred, np.float32),
     }
 
 
@@ -357,8 +336,6 @@ def _export_test_predictions(
             "y_dir_pred": preds["y_dir_pred"],
             "y_reg_true": preds["y_reg_true"],
             "y_reg_pred": preds["y_reg_pred"],
-            "y_ret_true_std": preds["y_ret_true_std"],
-            "y_ret_pred_std": preds["y_ret_pred_std"],
         }
     )
     pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
@@ -596,7 +573,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             shuffle_train=args.shuffle_train,
             n_dir_classes=config.n_dir_classes,
             dir_n_forward=args.dir_n_forward,
-            ret_n_forward=args.ret_n_forward,
         )
 
         feature_dim = int(train_loader.dataset.features.shape[1])
@@ -650,7 +626,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         # The auxiliary return head loss is intentionally excluded: during the
         # first ~10 epochs the return head transitions from near-zero predictions
         # to spread predictions (variance regulariser), which transiently spikes
-        # val_ret_loss even while direction/regime heads improve.  Including the
+        # (previously, return-head loss spikes contaminated early stopping here)
         # return loss in early stopping caused premature termination (e.g. fold6
         # stopped at epoch 3) and severely degraded regime accuracy.
         best_val_primary_loss = float("inf")  # dir_loss + reg_loss only
@@ -686,11 +662,10 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 f"Epoch {epoch:03d} | "
                 f"train={train_metrics['total_loss']:.4f} "
                 f"(dir={train_metrics['dir_loss']:.4f} acc={train_metrics['dir_acc']:.3f} "
-                f"reg={train_metrics['reg_loss']:.4f} acc={train_metrics['reg_acc']:.3f} "
-                f"ret={train_metrics['ret_loss']:.4f}) | "
+                f"reg={train_metrics['reg_loss']:.4f} acc={train_metrics['reg_acc']:.3f}) | "
                 f"val={val_metrics['total_loss']:.4f} "
                 f"(dir={val_metrics['dir_loss']:.4f} acc={val_metrics['dir_acc']:.3f} "
-                f"reg={val_metrics['reg_loss']:.4f}) "
+                f"reg={val_metrics['reg_loss']:.4f} acc={val_metrics['reg_acc']:.3f}) "
                 f"lr={scheduler.get_last_lr()[0]:.2e}",
                 flush=True,
             )
@@ -701,14 +676,12 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                     "train_total_loss": float(train_metrics["total_loss"]),
                     "train_dir_loss": float(train_metrics["dir_loss"]),
                     "train_reg_loss": float(train_metrics["reg_loss"]),
-                    "train_ret_loss": float(train_metrics["ret_loss"]),
                     "train_dir_acc": float(train_metrics["dir_acc"]),
                     "train_reg_acc": float(train_metrics["reg_acc"]),
                     "train_num_samples": int(train_metrics["num_samples"]),
                     "val_total_loss": float(val_metrics["total_loss"]),
                     "val_dir_loss": float(val_metrics["dir_loss"]),
                     "val_reg_loss": float(val_metrics["reg_loss"]),
-                    "val_ret_loss": float(val_metrics["ret_loss"]),
                     "val_dir_acc": float(val_metrics["dir_acc"]),
                     "val_reg_acc": float(val_metrics["reg_acc"]),
                     "val_num_samples": int(val_metrics["num_samples"]),
@@ -803,7 +776,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             "test_total_loss": float(test_metrics["total_loss"]),
             "test_dir_loss": float(test_metrics["dir_loss"]),
             "test_reg_loss": float(test_metrics["reg_loss"]),
-            "test_ret_loss": float(test_metrics["ret_loss"]),
             "test_dir_acc": float(test_metrics["dir_acc"]),
             "test_reg_acc": float(test_metrics["reg_acc"]),
             "test_num_samples": int(test_metrics["num_samples"]),
@@ -924,7 +896,6 @@ def parse_args(
     parser.add_argument("--n-reg-classes", type=int, default=4)
     parser.add_argument("--lambda-dir", type=float, default=2.0)
     parser.add_argument("--lambda-reg", type=float, default=0.3)
-    parser.add_argument("--lambda-ret", type=float, default=0.2)
     parser.add_argument("--dir-label-smoothing", type=float, default=0.0)
     parser.add_argument("--dir-q-low", type=float, default=0.33)
     parser.add_argument("--dir-q-high", type=float, default=0.67)
@@ -959,31 +930,16 @@ def parse_args(
              "5-day forward returns have stronger momentum signal than 1-day.",
     )
     parser.add_argument(
-        "--ret-n-forward",
-        type=int,
-        default=20,
-        help="Return label horizon in trading days (default 20). "
-             "20-day cumulative returns have ~2× better SNR than 5-day; "
-             "the return head is an auxiliary encoder regulariser, not the primary task.",
-    )
-    parser.add_argument(
-        "--ret-var-coeff",
-        type=float,
-        default=0.1,
-        help="Return head variance regulariser weight (0 = disabled). "
-             "Penalises near-constant return predictions to force spread.",
-    )
-    parser.add_argument(
         "--use-task-specific-heads",
         action="store_true",
         default=True,
-        help="Direction and return heads read from h_pooled (bypass the 64→16 bottleneck projection).",
+        help="Direction head reads from h_pooled (bypasses the 64→16 bottleneck projection).",
     )
     parser.add_argument(
         "--no-task-specific-heads",
         dest="use_task_specific_heads",
         action="store_false",
-        help="Revert direction/return heads to read from z (16-dim bottleneck); ablation only.",
+        help="Revert direction head to read from z (16-dim bottleneck); ablation only.",
     )
     parser.add_argument(
         "--no-shuffle-train",

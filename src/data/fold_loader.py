@@ -1,9 +1,13 @@
 """
 get_fold_loaders — build train/val/test DataLoaders for one walk-forward fold.
 
-All normalization statistics (scaler mean/std, direction thresholds, return
-mean/std) are computed from the training split only and applied uniformly
-to val and test — no future information leaks across splits.
+All normalization statistics (scaler mean/std, direction thresholds) are
+computed from the training split only and applied uniformly to val and test
+— no future information leaks across splits.
+
+The model predicts two targets:
+    direction : binary Up/Down (sign of dir_n_forward-day cumulative log return)
+    regime    : HMM state (0..K-1, K=4) from Viterbi decoding
 """
 
 import os
@@ -22,7 +26,6 @@ from .features import (
     REGIME_PROB_COLS,
     SENT_COLS,
     UNBOUNDED_COLS,
-    standardize_returns,
 )
 
 def _required_raw_columns() -> list[str]:
@@ -106,11 +109,15 @@ def get_fold_loaders(
     shuffle_train: bool = True,
     n_dir_classes: int = 2,
     dir_n_forward: int = 5,
-    ret_n_forward: int = 20,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Loads train/val/test CSVs from fold_dir, applies the full feature
     engineering + normalization pipeline, and returns three DataLoaders.
+
+    The model predicts direction (binary Up/Down) and regime (HMM state).
+    The auxiliary return regression head has been removed — after extensive
+    experimentation it consistently achieved standardised MAE ≈ 0.9 (random
+    predictions), causing gradient interference that degraded direction accuracy.
 
     Args:
         fold_dir      : path to a directory containing
@@ -124,11 +131,6 @@ def get_fold_loaders(
         shuffle_train : randomise training batch order (recommended)
         n_dir_classes : 2 = binary Up/Down (default); 3 = Bear/Neutral/Bull
         dir_n_forward : label horizon for direction target (days ahead, default 5)
-        ret_n_forward : label horizon for return target (days ahead, default 20).
-                        20-day cumulative returns have ~2× better SNR than 5-day;
-                        the return head is an auxiliary task that shapes the shared
-                        encoder — a longer horizon reduces label noise without
-                        degrading the direction or regime signals.
 
     Returns:
         (train_loader, val_loader, test_loader)
@@ -193,32 +195,15 @@ def get_fold_loaders(
         q_low, q_high, n_classes=n_dir_classes,
     )
 
-    # ── Standardized return targets ───────────────────────────────────────
-    # ret_n_forward-day cumulative log return standardised using training stats.
-    # The last ret_n_forward rows will be NaN; nan_to_num replaces with 0.
-    train_fwd_ret = _fwd_return(train_df, ret_n_forward).values
-    train_fwd_ret_finite = train_fwd_ret[np.isfinite(train_fwd_ret)]
-
-    train_ret_std, _, _ = standardize_returns(train_fwd_ret_finite, train_fwd_ret)
-    val_ret_std, _, _   = standardize_returns(
-        train_fwd_ret_finite, _fwd_return(val_df, ret_n_forward).values
-    )
-    test_ret_std, _, _  = standardize_returns(
-        train_fwd_ret_finite, _fwd_return(test_df, ret_n_forward).values
-    )
-    train_ret_std = np.nan_to_num(train_ret_std, nan=0.0, posinf=0.0, neginf=0.0)
-    val_ret_std   = np.nan_to_num(val_ret_std,   nan=0.0, posinf=0.0, neginf=0.0)
-    test_ret_std  = np.nan_to_num(test_ret_std,  nan=0.0, posinf=0.0, neginf=0.0)
-
     # ── Regime labels ─────────────────────────────────────────────────────
     train_reg = train_df["regime_label"].values.astype(np.int64)
     val_reg = val_df["regime_label"].values.astype(np.int64)
     test_reg = test_df["regime_label"].values.astype(np.int64)
 
     # ── Build datasets and loaders ────────────────────────────────────────
-    train_ds = SPYWindowDataset(train_feat, train_reg, train_dir_all, train_ret_std, window_size)
-    val_ds = SPYWindowDataset(val_feat, val_reg, val_dir_all, val_ret_std, window_size)
-    test_ds = SPYWindowDataset(test_feat, test_reg, test_dir_all, test_ret_std, window_size)
+    train_ds = SPYWindowDataset(train_feat, train_reg, train_dir_all, window_size)
+    val_ds = SPYWindowDataset(val_feat, val_reg, val_dir_all, window_size)
+    test_ds = SPYWindowDataset(test_feat, test_reg, test_dir_all, window_size)
     for split_name, ds in (("train", train_ds), ("val", val_ds), ("test", test_ds)):
         if len(ds) <= 0:
             raise ValueError(

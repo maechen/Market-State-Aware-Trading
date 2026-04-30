@@ -1,5 +1,11 @@
 """
-Classification and regression heads on the bottleneck latent vector z.
+Classification heads for the two supervised tasks: direction and regime.
+
+The auxiliary return regression head (ReturnHead) has been permanently removed.
+After extensive experimentation across 5-day and 20-day horizons the head
+consistently achieved standardised MAE ≈ 0.9 (random predictions), causing
+gradient interference that degraded direction accuracy (MTL task-interference
+literature).  The model now trains as a clean 2-head system.
 """
 
 import torch
@@ -72,26 +78,5 @@ class RegimeHead(nn.Module):
         map latent z to regime logits
         :param z: tensor (batch, d_z)
         :return: logits (batch, n_classes)
-        """
-        return self.linear(z)
-
-
-class ReturnHead(nn.Module):
-    """
-    scalar prediction of standardized n-day forward log return (median, τ=0.5).
-    :param d_z: input dimension (d_model when use_task_specific_heads=True, else d_z)
-    """
-
-    def __init__(self, d_z: int) -> None:
-        super().__init__()
-        self.linear = nn.Linear(d_z, 1)
-        nn.init.xavier_uniform_(self.linear.weight)
-        nn.init.zeros_(self.linear.bias)
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        map latent z to one return value per sample
-        :param z: tensor (batch, d_z)
-        :return: predictions (batch, 1)
         """
         return self.linear(z)

@@ -217,25 +217,3 @@ def make_direction_labels(
     return labels, lo, hi
 
 
-# ── Return standardization ────────────────────────────────────────────────────
-
-def standardize_returns(
-    train_ret: np.ndarray,
-    eval_ret: np.ndarray,
-) -> Tuple[np.ndarray, float, float]:
-    """
-    Standardizes eval_ret using training fold mean and std.
-
-    Args:
-        train_ret : NaN-free training n-day forward returns (finite values only)
-        eval_ret  : target split n-day forward returns (may contain NaN at tail)
-    Returns:
-        standardized : float32 array
-        mean         : training mean
-        std          : training std (clamped to 1.0 if near zero)
-    """
-    mean = float(np.mean(train_ret))
-    std = float(np.std(train_ret))
-    if std < 1e-8:
-        std = 1.0
-    return ((eval_ret - mean) / std).astype(np.float32), mean, std

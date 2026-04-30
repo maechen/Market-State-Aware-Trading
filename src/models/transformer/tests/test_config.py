@@ -96,14 +96,14 @@ def test_cross_attn_gate_mode_selectable():
 
 
 def test_lambda_defaults():
+    """Loss is direction focal-CE + regime CE with no auxiliary tasks."""
     cfg = TransformerConfig()
     assert cfg.lambda_dir == 2.0
     assert cfg.lambda_reg == 0.3
-    assert cfg.lambda_ret == 0.2
 
 
 def test_use_task_specific_heads_default():
-    """Direction and return heads bypass the 64→16 bottleneck projection by default."""
+    """Direction head bypasses the 64→16 bottleneck projection by default."""
     cfg = TransformerConfig()
     assert cfg.use_task_specific_heads is True
 
@@ -172,12 +172,3 @@ def test_n_dir_classes_can_be_three():
     assert cfg.n_dir_classes == 3
 
 
-def test_ret_var_coeff_default():
-    """Return variance regulariser defaults to 0.1."""
-    cfg = TransformerConfig()
-    assert cfg.ret_var_coeff == 0.1
-
-
-def test_ret_var_coeff_can_be_disabled():
-    cfg = TransformerConfig(ret_var_coeff=0.0)
-    assert cfg.ret_var_coeff == 0.0

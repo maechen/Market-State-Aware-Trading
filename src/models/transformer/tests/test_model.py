@@ -17,7 +17,6 @@ def make_targets(cfg: TransformerConfig, batch: int = B) -> dict:
     return {
         "y_dir": torch.randint(0, cfg.n_dir_classes, (batch,)),
         "y_reg": torch.randint(0, cfg.n_reg_classes, (batch,)),
-        "y_ret_std": torch.randn(batch),
     }
 
 
@@ -40,14 +39,13 @@ def test_output_shapes(gate_mode, readout_mode):
     assert out["z_pre"].shape == (B, cfg.d_z)
     assert out["dir_logits"].shape == (B, cfg.n_dir_classes)
     assert out["reg_logits"].shape == (B, cfg.n_reg_classes)
-    assert out["ret_pred"].shape == (B, 1)
 
 
 def test_output_has_all_keys():
     cfg = TransformerConfig()
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
-    for key in ("z", "z_pre", "dir_logits", "reg_logits", "ret_pred"):
+    for key in ("z", "z_pre", "dir_logits", "reg_logits"):
         assert key in out, f"Missing key: {key}"
 
 
@@ -90,7 +88,7 @@ def test_compute_loss_dict_has_expected_keys():
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
-    for key in ("dir_loss", "reg_loss", "ret_loss", "total_loss"):
+    for key in ("dir_loss", "reg_loss", "total_loss"):
         assert key in info, f"Missing loss key: {key}"
 
 
@@ -99,19 +97,16 @@ def test_compute_loss_components_are_nonnegative():
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
-    assert info["dir_loss"] >= 0
     assert info["reg_loss"] >= 0
-    assert info["ret_loss"] >= 0
 
 
 def test_compute_loss_total_equals_weighted_sum():
-    cfg = TransformerConfig(lambda_dir=1.0, lambda_reg=0.5, lambda_ret=0.5)
+    cfg = TransformerConfig(lambda_dir=1.0, lambda_reg=0.5)
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
     expected = (cfg.lambda_dir * info["dir_loss"]
-                + cfg.lambda_reg * info["reg_loss"]
-                + cfg.lambda_ret * info["ret_loss"])
+                + cfg.lambda_reg * info["reg_loss"])
     assert abs(info["total_loss"] - expected) < 1e-5
 
 
@@ -125,7 +120,6 @@ def test_gradient_flows_end_to_end(gate_mode):
     out = model(x)
     loss, _ = model.compute_loss(out, make_targets(cfg))
     loss.backward()
-    # Every parameter with requires_grad should have a gradient
     for name, p in model.named_parameters():
         if p.requires_grad:
             assert p.grad is not None, f"No gradient for parameter: {name}"
@@ -137,8 +131,6 @@ def test_causal_property_of_transformer_stack():
     """
     With a causal mask, changing positions t=5..W-1 in the input must NOT
     change the transformer hidden states at positions 0..4.
-    The final model output uses only the last hidden state, but we can check
-    the internal stack directly via partial forward.
     """
     from src.models.transformer.layers import make_causal_mask, TransformerStack
 
@@ -216,7 +208,6 @@ def test_task_specific_heads_output_shapes(gate_mode):
     with torch.no_grad():
         out = model(make_input(cfg))
     assert out["dir_logits"].shape == (B, cfg.n_dir_classes)
-    assert out["ret_pred"].shape == (B, 1)
     assert out["z"].shape == (B, cfg.d_z)
 
 
@@ -229,7 +220,6 @@ def test_no_task_specific_heads_output_shapes(gate_mode):
     with torch.no_grad():
         out = model(make_input(cfg))
     assert out["dir_logits"].shape == (B, cfg.n_dir_classes)
-    assert out["ret_pred"].shape == (B, 1)
     assert out["z"].shape == (B, cfg.d_z)
 
 
@@ -252,35 +242,32 @@ def test_task_specific_heads_gradient_flows_to_dir_head():
 # ── Focal loss ────────────────────────────────────────────────────────────────
 
 def test_focal_gamma_zero_gives_finite_loss():
-    """focal_gamma=0 reduces to standard cross-entropy; loss must be finite and non-negative."""
+    """focal_gamma=0 reduces to standard cross-entropy; total loss must be finite."""
     cfg = TransformerConfig(focal_gamma=0.0)
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     loss, info = model.compute_loss(out, make_targets(cfg))
     assert torch.isfinite(loss), "Loss not finite with focal_gamma=0"
-    assert info["dir_loss"] >= 0
+    assert info["reg_loss"] >= 0
 
 
 def test_focal_gamma_positive_gives_finite_loss():
-    """focal_gamma=2.0 (default) must produce a finite, non-negative direction loss."""
+    """focal_gamma=2.0 (default) must produce a finite total loss.
+    dir_loss can be negative when dir_entropy_coeff>0 (entropy regulariser subtracts
+    from the raw focal loss to prevent mode collapse — this is intentional)."""
     cfg = TransformerConfig(focal_gamma=2.0)
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     loss, info = model.compute_loss(out, make_targets(cfg))
     assert torch.isfinite(loss), "Loss not finite with focal_gamma=2"
-    assert info["dir_loss"] >= 0
 
 
 def test_focal_loss_is_lower_than_standard_ce_on_easy_samples():
     """
     Focal loss should assign lower weight to easy (high-confidence correct) samples.
-    We manufacture an easy batch where the model gives near-certain correct answers
-    and verify that focal loss < standard CE.
     """
     from src.models.transformer.model import _focal_cross_entropy
 
-    # Moderate logits where class 0 is clearly preferred (p_t ≈ 0.88)
-    # but not so extreme that float32 underflow collapses both losses to 0.
     logits = torch.tensor([[2.5, -1.0, -1.0]] * 8)
     targets = torch.zeros(8, dtype=torch.long)
 

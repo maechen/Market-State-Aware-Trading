@@ -1,5 +1,12 @@
 """
-MarketTransformer: sentiment gate, causal transformer, bottleneck, and multitask heads (direction, regime, return).
+MarketTransformer: sentiment gate, causal transformer, bottleneck, and two
+supervised heads — direction (binary Up/Down) and regime (HMM state).
+
+The auxiliary return regression head has been permanently removed.  After
+extensive experimentation across 5-day and 20-day horizons the head
+consistently achieved standardised MAE ≈ 0.9 (essentially random predictions).
+Gradient interference from this failing auxiliary task degraded the shared
+encoder (MTL task-interference literature, MT2ST OpenReview 2024).
 """
 
 import torch
@@ -11,7 +18,7 @@ from .config import TransformerConfig, GateMode
 from .gate import SentimentGate, CrossAttentionGate
 from .layers import PositionalEncoding, TransformerStack, TemporalReadout, make_causal_mask
 from .bottleneck import Bottleneck
-from .heads import DirectionHead, RegimeHead, ReturnHead
+from .heads import DirectionHead, RegimeHead
 
 
 def _focal_cross_entropy(
@@ -43,7 +50,13 @@ def _focal_cross_entropy(
 
 class MarketTransformer(nn.Module):
     """
-    end-to-end model from windowed features to latent z and three supervised predictions
+    End-to-end model: sentiment gate → causal transformer → bottleneck → two heads.
+
+    Direction head: predicts n-day forward Up/Down (binary classification).
+    Regime head:    predicts HMM market state (0..K-1, K=4).
+
+    Loss = λ_dir × focal_CE(direction) + λ_reg × CE(regime)
+
     :param config: TransformerConfig with dimensions, gate mode, readout, and loss weights
     """
 
@@ -68,40 +81,35 @@ class MarketTransformer(nn.Module):
             config.d_model, config.n_heads, config.d_ff, config.n_layers, config.dropout
         )
         self.readout = TemporalReadout(config.d_model, config.readout_mode)
-
         self.bottleneck = Bottleneck(config.d_model, config.d_z)
 
-        # Regime head always reads from z (compact 16-dim linear projection of h_pooled).
-        # z is intentionally small so that DRL can use it as a low-dimensional state.
+        # Regime head reads from z (compact 16-dim bottleneck output).
+        # z is intentionally small so DRL can use it as a low-dimensional state.
         self.reg_head = RegimeHead(config.d_z, config.n_reg_classes)
 
+        # Direction head reads from h_pooled (d_model=64) when use_task_specific_heads=True.
+        # Bypassing the 64→16 bottleneck projection gives the direction head 4× more
+        # representational capacity and decouples its gradients from the regime→z path.
         if config.use_task_specific_heads:
-            # Direction and return heads read from h_pooled (d_model=64) rather than
-            # z (d_z=16).  Even though the bottleneck no longer applies tanh (removed
-            # to fix gradient saturation), the linear 64→16 projection still discards
-            # information.  Connecting dir/ret directly to h_pooled gives them 4× the
-            # representational capacity and avoids gradient interference with the
-            # regime→z path.
             self.dir_head = DirectionHead(
                 config.d_model, config.n_dir_classes, hidden=config.dir_head_hidden
             )
-            self.ret_head = ReturnHead(config.d_model)
         else:
             self.dir_head = DirectionHead(
                 config.d_z, config.n_dir_classes, hidden=config.dir_head_hidden
             )
-            self.ret_head = ReturnHead(config.d_z)
 
     def forward(self, x: torch.Tensor) -> dict:
         """
-        encode a batch of W-day windows into latent z and multitask logits
-        :param x: tensor (batch, W, d_feat + d_sent); first d_feat columns are price/tech, rest sentiment
+        Encode a batch of W-day windows into latent z and two-head predictions.
+
+        :param x: tensor (batch, W, d_feat + d_sent)
         :return:
-          dict with keys z, z_pre, dir_logits, reg_logits, ret_pred (shapes per TransformerConfig)
+          dict with keys: z, z_pre, dir_logits, reg_logits
         """
         B, W, _ = x.shape
         price_tech = x[..., : self.config.d_feat]
-        sent_seq = x[:, :, self.config.d_feat :]   # (B, W, d_sent) full sentiment window
+        sent_seq = x[:, :, self.config.d_feat :]   # (B, W, d_sent)
 
         gated = self.gate(price_tech, sent_seq)
 
@@ -111,38 +119,32 @@ class MarketTransformer(nn.Module):
             h = gated
 
         h = self.pos_enc(h)
-
         causal_mask = make_causal_mask(W, x.device)
         h = self.transformer_stack(h, causal_mask)
 
         h_pooled = self.readout(h)
         z, z_pre = self.bottleneck(h_pooled)
 
-        if self.config.use_task_specific_heads:
-            dir_logits = self.dir_head(h_pooled)
-            ret_pred = self.ret_head(h_pooled)
-        else:
-            dir_logits = self.dir_head(z)
-            ret_pred = self.ret_head(z)
+        dir_logits = self.dir_head(h_pooled if self.config.use_task_specific_heads else z)
 
         return {
             "z": z,
             "z_pre": z_pre,
             "dir_logits": dir_logits,
             "reg_logits": self.reg_head(z),
-            "ret_pred": ret_pred,
         }
 
     def compute_loss(
         self, out: dict, targets: dict
     ) -> tuple[torch.Tensor, dict]:
         """
-        weighted sum of focal direction CE, regime CE, and Quantile (pinball τ=0.5) return loss.
-        :param out: forward() output dict
-        :param targets: dict with y_dir, y_reg, y_ret_std (batch tensors); optional dir_weights for CE
+        Loss = λ_dir × focal_CE(direction) + λ_reg × CE(regime)
+
+        :param out:     forward() output dict (z, dir_logits, reg_logits)
+        :param targets: dict with y_dir (int64), y_reg (int64); optional dir_weights
         :return:
-          total: scalar loss tensor for backprop
-          info: dict of float component losses (dir_loss, reg_loss, ret_loss, total_loss)
+          total : scalar loss tensor for backprop
+          info  : dict of float component losses (dir_loss, reg_loss, total_loss)
         """
         cfg = self.config
 
@@ -162,9 +164,9 @@ class MarketTransformer(nn.Module):
             )
 
         # Entropy regularisation — maximise prediction entropy to prevent mode
-        # collapse (e.g. always predicting neutral).  Subtracting the mean entropy
-        # of the direction distribution encourages the head to spread probability
-        # mass across classes rather than concentrating on the majority class.
+        # collapse (e.g. always predicting Down).  Coefficient 0.3 is needed
+        # because later folds (fold5/7/8) acquire a strong Down bias from
+        # 2018/2020 crash periods in their training windows; 0.1 was insufficient.
         if cfg.dir_entropy_coeff > 0:
             dir_probs = F.softmax(out["dir_logits"], dim=-1).clamp(min=1e-8)
             dir_entropy = -(dir_probs * dir_probs.log()).sum(dim=-1).mean()
@@ -172,39 +174,20 @@ class MarketTransformer(nn.Module):
 
         reg_loss = F.cross_entropy(out["reg_logits"], targets["y_reg"])
 
-        # Quantile (pinball) loss at τ=0.5 replaces Huber for the return head.
-        # τ=0.5 is median regression (= 0.5 × MAE).  Unlike Huber, the gradient
-        # magnitude is constant (±0.5) everywhere, so the model cannot reduce
-        # gradients by staying near zero — it must track the actual median.
-        ret_pred = out["ret_pred"].squeeze(-1)
-        ret_true = targets["y_ret_std"].float()
-        residual  = ret_true - ret_pred
-        ret_loss  = torch.where(residual >= 0, 0.5 * residual, -0.5 * residual).mean()
-
-        # Variance regulariser: penalise predictions with batch std < 0.3 to
-        # discourage the return head from collapsing to a near-constant output.
-        # Applied only during training (self.training=True) so val_ret_loss
-        # reflects true prediction quality rather than a regularisation term.
-        if self.training and cfg.ret_var_coeff > 0:
-            batch_std = ret_pred.std()
-            ret_loss  = ret_loss + cfg.ret_var_coeff * F.relu(0.3 - batch_std)
-
-        total = cfg.lambda_dir * dir_loss + cfg.lambda_reg * reg_loss + cfg.lambda_ret * ret_loss
+        total = cfg.lambda_dir * dir_loss + cfg.lambda_reg * reg_loss
 
         return total, {
             "dir_loss": dir_loss.item(),
             "reg_loss": reg_loss.item(),
-            "ret_loss": ret_loss.item(),
             "total_loss": total.item(),
         }
 
     def configure_optimizers(self, lr: float, weight_decay: float) -> list[dict]:
         """
-        split parameters into AdamW-style decay (linear / MHA weights) vs no-decay (bias, LayerNorm).
-        :param lr: base learning rate (stored in returned dicts only if caller uses it; here unused)
+        Split parameters into AdamW-style decay (linear/MHA weights) vs no-decay (bias, LayerNorm).
+        :param lr: base learning rate
         :param weight_decay: L2 coefficient for the decay group
-        :return:
-          list of two optimizer param groups: high decay, zero decay
+        :return: list of two optimizer param groups
         """
         decay: set[str] = set()
         no_decay: set[str] = set()
@@ -219,7 +202,6 @@ class MarketTransformer(nn.Module):
                 elif param_name.endswith("weight") and isinstance(
                     module, nn.MultiheadAttention
                 ):
-                    # Fused in_proj_weight / separate q/k/v weights are not on nn.Linear
                     decay.add(full_name)
                 elif param_name.endswith("weight") and isinstance(
                     module, (nn.LayerNorm, nn.Embedding)

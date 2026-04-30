@@ -202,12 +202,10 @@ def plot_crossfold_test_metrics(run_dir: Path, out_dir: Path) -> Path:
     total_loss = fm["test_total_loss"].values
     dir_loss = fm["test_dir_loss"].values
     reg_loss = fm["test_reg_loss"].values
-    ret_loss = fm["test_ret_loss"].values
-    w3 = 0.2
-    ax_loss.bar(x - 1.5 * w3, total_loss, w3, color="#264653", label="Total", zorder=3)
-    ax_loss.bar(x - 0.5 * w3, dir_loss, w3, color="#E63946", label="Direction", zorder=3)
-    ax_loss.bar(x + 0.5 * w3, reg_loss, w3, color="#2A9D8F", label="Regime", zorder=3)
-    ax_loss.bar(x + 1.5 * w3, ret_loss, w3, color="#E9C46A", label="Return", zorder=3)
+    w3 = 0.25
+    ax_loss.bar(x - w3, total_loss, w3, color="#264653", label="Total", zorder=3)
+    ax_loss.bar(x, dir_loss, w3, color="#E63946", label="Direction", zorder=3)
+    ax_loss.bar(x + w3, reg_loss, w3, color="#2A9D8F", label="Regime", zorder=3)
     ax_loss.set_xticks(x)
     ax_loss.set_xticklabels(folds, rotation=30, ha="right", fontsize=9)
     ax_loss.set_ylabel("Loss", fontsize=10)
