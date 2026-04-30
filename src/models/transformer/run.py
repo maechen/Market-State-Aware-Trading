@@ -646,7 +646,15 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         fold_output.mkdir(parents=True, exist_ok=True)
         best_ckpt_path = fold_output / "best_model.pt"
 
-        best_val_loss = float("inf")
+        # Early stopping tracks the sum of direction + regime validation losses.
+        # The auxiliary return head loss is intentionally excluded: during the
+        # first ~10 epochs the return head transitions from near-zero predictions
+        # to spread predictions (variance regulariser), which transiently spikes
+        # val_ret_loss even while direction/regime heads improve.  Including the
+        # return loss in early stopping caused premature termination (e.g. fold6
+        # stopped at epoch 3) and severely degraded regime accuracy.
+        best_val_primary_loss = float("inf")  # dir_loss + reg_loss only
+        best_val_loss = float("inf")           # total (for reporting in fold_summary.json)
         best_epoch = -1
         epoch_rows: list[dict[str, float | int]] = []
 
@@ -707,7 +715,9 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 }
             )
 
-            if val_metrics["total_loss"] < best_val_loss:
+            val_primary_loss = val_metrics["dir_loss"] + val_metrics["reg_loss"]
+            if val_primary_loss < best_val_primary_loss:
+                best_val_primary_loss = val_primary_loss
                 best_val_loss = float(val_metrics["total_loss"])
                 best_epoch = epoch
                 _save_checkpoint(
@@ -933,10 +943,12 @@ def parse_args(
     parser.add_argument(
         "--dir-entropy-coeff",
         type=float,
-        default=0.1,
+        default=0.3,
         help=(
             "Entropy regularisation weight for direction head (0 = disabled). "
-            "Subtracts coeff*H(softmax(logits)) from dir_loss to prevent mode collapse."
+            "Subtracts coeff*H(softmax(logits)) from dir_loss to prevent mode collapse. "
+            "0.3 is required to overcome the directional bias that later folds (5/7/8) "
+            "acquire from 2018/2020 down-market periods in their training windows."
         ),
     )
     parser.add_argument(

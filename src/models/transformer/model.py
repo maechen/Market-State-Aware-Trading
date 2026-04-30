@@ -183,7 +183,9 @@ class MarketTransformer(nn.Module):
 
         # Variance regulariser: penalise predictions with batch std < 0.3 to
         # discourage the return head from collapsing to a near-constant output.
-        if cfg.ret_var_coeff > 0:
+        # Applied only during training (self.training=True) so val_ret_loss
+        # reflects true prediction quality rather than a regularisation term.
+        if self.training and cfg.ret_var_coeff > 0:
             batch_std = ret_pred.std()
             ret_loss  = ret_loss + cfg.ret_var_coeff * F.relu(0.3 - batch_std)
 

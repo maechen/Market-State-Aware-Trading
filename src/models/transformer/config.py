@@ -131,9 +131,12 @@ class TransformerConfig:
     # Entropy regularisation coefficient for the direction head.
     # Subtracts `dir_entropy_coeff * H(softmax(dir_logits))` from dir_loss to
     # MAXIMISE prediction entropy, preventing the head from collapsing to always
-    # predicting the same class (mode collapse).  Empirically 0.05–0.15 is a good
-    # range; set to 0.0 to disable.
-    dir_entropy_coeff: float = 0.1
+    # predicting the same class (mode collapse).  0.3 is needed because later
+    # walk-forward folds (fold5/7/8) include 2018/2020 down periods in training
+    # that bias the model toward predicting Down even when the test period is
+    # bullish.  The penalty ≈ 0.3 × ln(2) ≈ 0.21 nats must exceed the CE gain
+    # from collapsing; 0.1 was insufficient, 0.3 empirically resolves fold5/7/8.
+    dir_entropy_coeff: float = 0.3
 
     # Return head: variance regularisation coefficient.
     # Adds `ret_var_coeff * ReLU(0.3 - std(ret_pred))` to ret_loss to penalise

@@ -5,8 +5,9 @@ from src.models.transformer.config import TransformerConfig, GateMode, ReadoutMo
 
 
 def test_default_d_feat():
+    """16 price/tech features: 10 z-scored + 1 RSI + 1 BB%B + 4 regime probs."""
     cfg = TransformerConfig()
-    assert cfg.d_feat == 7
+    assert cfg.d_feat == 16
 
 
 def test_default_d_sent():
@@ -15,8 +16,9 @@ def test_default_d_sent():
 
 
 def test_total_input_width():
+    """19 total: 16 price/tech + 3 sentiment."""
     cfg = TransformerConfig()
-    assert cfg.d_feat + cfg.d_sent == 10
+    assert cfg.d_feat + cfg.d_sent == 19
 
 
 def test_default_d_model():
@@ -143,9 +145,9 @@ def test_dir_label_smoothing_default():
 
 
 def test_dir_entropy_coeff_default():
-    """Entropy regularisation defaults to 0.1 to prevent direction mode collapse."""
+    """Entropy regularisation defaults to 0.3 to overcome fold5/7/8 directional bias."""
     cfg = TransformerConfig()
-    assert cfg.dir_entropy_coeff == 0.1
+    assert cfg.dir_entropy_coeff == 0.3
 
 
 def test_dir_entropy_coeff_can_be_disabled():
