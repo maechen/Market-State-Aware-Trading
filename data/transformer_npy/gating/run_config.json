@@ -23,7 +23,7 @@
     "fold8"
   ],
   "transformer": {
-    "d_feat": 7,
+    "d_feat": 16,
     "d_sent": 3,
     "window_size": 20,
     "d_model": 64,
@@ -36,16 +36,18 @@
     "gate_mode": "cross_attn",
     "readout_mode": "attn_pool",
     "use_pre_tanh_z": false,
-    "n_dir_classes": 3,
+    "n_dir_classes": 2,
     "n_reg_classes": 4,
-    "lambda_dir": 1.5,
+    "lambda_dir": 2.0,
     "lambda_reg": 0.3,
-    "lambda_ret": 0.5,
+    "lambda_ret": 0.2,
     "dir_label_smoothing": 0.0,
-    "dir_q_low": 0.3,
-    "dir_q_high": 0.7,
+    "dir_q_low": 0.33,
+    "dir_q_high": 0.67,
     "dir_head_hidden": 32,
     "use_task_specific_heads": true,
-    "focal_gamma": 2.0
+    "focal_gamma": 2.0,
+    "dir_entropy_coeff": 0.1,
+    "ret_var_coeff": 0.1
   }
 }
