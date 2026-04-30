@@ -2,12 +2,12 @@ from __future__ import annotations
 import argparse, itertools, subprocess
 from pathlib import Path
 
-KS = [0.25, 0.50, 0.75]
-HORIZONS = [5, 10, 20]
+KS = [1.00, 1.25, 1.50]
+HORIZONS = [6, 7, 8]
 
 def parse_args() -> argparse.Namespace:
     p=argparse.ArgumentParser()
-    p.add_argument('--base-output', default='data/transformer_npy/event_grid')
+    p.add_argument('--base-output', default='data/transformer_npy/event_grid_hscaled')
     p.add_argument('--epochs', type=int, default=100)
     p.add_argument('--max-folds', type=int, default=None)
     p.add_argument('--device', default='auto')

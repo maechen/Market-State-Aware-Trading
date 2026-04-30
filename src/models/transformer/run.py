@@ -549,6 +549,8 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         "max_eval_batches": args.max_eval_batches,
         "folds": [fold["name"] for fold in selected_folds],
         "transformer": _transformer_config_to_dict(config),
+        "vol_threshold_horizon_scaled": bool(config.dir_label_mode == "vol_threshold"),
+        "vol_horizon_scale": float(np.sqrt(args.dir_n_forward)) if config.dir_label_mode == "vol_threshold" else 1.0,
     }
     with open(output_root / "run_config.json", "w", encoding="utf-8") as handle:
         json.dump(run_config, handle, indent=2)
