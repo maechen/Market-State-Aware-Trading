@@ -73,13 +73,13 @@ class TransformerConfig:
     d_model: int = 64
     d_ff: int = 128
     d_z: int = 16
-    n_layers: int = 2
+    n_layers: int = 3
     n_heads: int = 4
-    dropout: float = 0.2
+    dropout: float = 0.3
 
     gate_beta: float = 1.0
     gate_mode: GateMode = GateMode.CROSS_ATTN
-    readout_mode: ReadoutMode = ReadoutMode.LAST
+    readout_mode: ReadoutMode = ReadoutMode.ATTN_POOL
     use_pre_tanh_z: bool = False  # if true, RL obs uses z_pre instead of z
 
     # Binary direction (2) is the default.  The 3-class (Bear/Neutral/Bull)

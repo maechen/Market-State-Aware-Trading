@@ -850,10 +850,10 @@ def parse_args(
 
     # Training
     parser.add_argument("--variant", choices=VARIANT_CHOICES, default=default_variant)
-    parser.add_argument("--epochs", type=int, default=20, help="Training epochs per fold.")
+    parser.add_argument("--epochs", type=int, default=100, help="Training epochs per fold.")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
-    parser.add_argument("--lr", type=float, default=3e-4, help="AdamW learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="AdamW learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
@@ -889,9 +889,9 @@ def parse_args(
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--d-ff", type=int, default=128)
     parser.add_argument("--d-z", type=int, default=16)
-    parser.add_argument("--n-layers", type=int, default=2)
+    parser.add_argument("--n-layers", type=int, default=3)
     parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--gate-beta", type=float, default=1.0)
     parser.add_argument(
         "--gate-mode",
@@ -901,7 +901,7 @@ def parse_args(
     parser.add_argument(
         "--readout-mode",
         choices=[mode.value for mode in ReadoutMode],
-        default=ReadoutMode.LAST.value,
+        default=ReadoutMode.ATTN_POOL.value,
     )
     parser.add_argument(
         "--use-pre-tanh-z",

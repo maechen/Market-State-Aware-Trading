@@ -42,7 +42,7 @@ def test_default_d_z():
 
 def test_default_n_layers():
     cfg = TransformerConfig()
-    assert cfg.n_layers == 2
+    assert cfg.n_layers == 3
 
 
 def test_default_n_heads():
@@ -55,14 +55,14 @@ def test_default_gate_mode_is_cross_attn():
     assert cfg.gate_mode == GateMode.CROSS_ATTN
 
 
-def test_default_readout_mode_is_last():
+def test_default_readout_mode_is_attn_pool():
     cfg = TransformerConfig()
-    assert cfg.readout_mode == ReadoutMode.LAST
+    assert cfg.readout_mode == ReadoutMode.ATTN_POOL
 
 
 def test_default_n_dir_classes():
     cfg = TransformerConfig()
-    assert cfg.n_dir_classes == 3
+    assert cfg.n_dir_classes == 2
 
 
 def test_default_n_reg_classes():
