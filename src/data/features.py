@@ -178,6 +178,7 @@ def make_direction_labels(
     label_mode: str = "sign",
     eval_vol: np.ndarray | None = None,
     vol_k: float = 0.50,
+    vol_horizon_scale: float = 1.0,
     ignore_index: int = -1,
 ) -> Tuple[np.ndarray, float, float]:
     """
@@ -207,6 +208,10 @@ def make_direction_labels(
         q_low     : lower quantile bound (3-class only)
         q_high    : upper quantile bound (3-class only)
         n_classes : 2 = binary Up/Down; 3 = Bear/Neutral/Bull
+        vol_horizon_scale:
+            Multiplier used to scale a daily volatility estimate to the label horizon.
+            For h-day forward returns, use sqrt(h). This makes the threshold comparable
+            across horizon lengths.
     Returns:
         labels : int64 array of class indices
         lo     : lower threshold (0.0 for binary mode)
@@ -225,6 +230,8 @@ def make_direction_labels(
             raise ValueError("eval_vol must be provided when label_mode='vol_threshold'.")
         if vol_k < 0:
             raise ValueError("vol_k must be non-negative.")
+        if vol_horizon_scale <= 0:
+            raise ValueError("vol_horizon_scale must be positive.")
 
         eval_ret = np.asarray(eval_ret, dtype=np.float64)
         eval_vol = np.asarray(eval_vol, dtype=np.float64)
@@ -232,12 +239,12 @@ def make_direction_labels(
             raise ValueError(
                 f"eval_ret/eval_vol length mismatch: {eval_ret.shape[0]} vs {eval_vol.shape[0]}"
             )
-        threshold = vol_k * np.abs(eval_vol)
+        threshold = vol_k * np.abs(eval_vol) * float(vol_horizon_scale)
         valid = np.isfinite(eval_ret) & np.isfinite(threshold)
         labels = np.full(eval_ret.shape, ignore_index, dtype=np.int64)
         labels[valid & (eval_ret > threshold)] = 1
         labels[valid & (eval_ret < -threshold)] = 0
-        return labels, float(-vol_k), float(vol_k)
+        return labels, float(-vol_k * vol_horizon_scale), float(vol_k * vol_horizon_scale)
 
     if label_mode == "quantile_3class":
         if n_classes != 3:

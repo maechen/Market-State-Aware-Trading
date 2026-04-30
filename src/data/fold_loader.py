@@ -6,7 +6,9 @@ computed from the training split only and applied uniformly to val and test
 — no future information leaks across splits.
 
 The model predicts two targets:
-    direction : binary Up/Down (sign of dir_n_forward-day cumulative log return)
+    direction : binary Up/Down event label. In vol_threshold mode, ambiguous
+                returns inside ±k * rolling_vol_20 * sqrt(dir_n_forward) are
+                labeled -1 and ignored by direction CE.
     regime    : HMM state (0..K-1, K=4) from Viterbi decoding
 """
 
@@ -127,8 +129,6 @@ def get_fold_loaders(
                         spy_test_labeled.csv
         window_size   : W (lookback window in trading days)
         batch_size    : DataLoader batch size
-        q_low         : lower quantile for neutral band (3-class mode only)
-        q_high        : upper quantile for neutral band (3-class mode only)
         num_workers   : DataLoader worker processes
         shuffle_train : randomise training batch order (recommended)
         n_dir_classes : 2 = binary Up/Down (default); 3 = Bear/Neutral/Bull
@@ -198,17 +198,36 @@ def get_fold_loaders(
     train_vol = train_df[dir_vol_col].values if dir_label_mode == "vol_threshold" else None
     val_vol = val_df[dir_vol_col].values if dir_label_mode == "vol_threshold" else None
     test_vol = test_df[dir_vol_col].values if dir_label_mode == "vol_threshold" else None
+    vol_horizon_scale = float(np.sqrt(dir_n_forward)) if dir_label_mode == "vol_threshold" else 1.0
     train_dir_all, lo, hi = make_direction_labels(
-        train_fwd_dir_finite, train_fwd_dir, n_classes=n_dir_classes,
-        label_mode=dir_label_mode, eval_vol=train_vol, vol_k=dir_vol_k, ignore_index=dir_ignore_index
+        train_fwd_dir_finite,
+        train_fwd_dir,
+        n_classes=n_dir_classes,
+        label_mode=dir_label_mode,
+        eval_vol=train_vol,
+        vol_k=dir_vol_k,
+        vol_horizon_scale=vol_horizon_scale,
+        ignore_index=dir_ignore_index,
     )
     val_dir_all, _, _ = make_direction_labels(
-        train_fwd_dir_finite, val_fwd_dir, n_classes=n_dir_classes,
-        label_mode=dir_label_mode, eval_vol=val_vol, vol_k=dir_vol_k, ignore_index=dir_ignore_index
+        train_fwd_dir_finite,
+        val_fwd_dir,
+        n_classes=n_dir_classes,
+        label_mode=dir_label_mode,
+        eval_vol=val_vol,
+        vol_k=dir_vol_k,
+        vol_horizon_scale=vol_horizon_scale,
+        ignore_index=dir_ignore_index,
     )
     test_dir_all, _, _ = make_direction_labels(
-        train_fwd_dir_finite, test_fwd_dir, n_classes=n_dir_classes,
-        label_mode=dir_label_mode, eval_vol=test_vol, vol_k=dir_vol_k, ignore_index=dir_ignore_index
+        train_fwd_dir_finite,
+        test_fwd_dir,
+        n_classes=n_dir_classes,
+        label_mode=dir_label_mode,
+        eval_vol=test_vol,
+        vol_k=dir_vol_k,
+        vol_horizon_scale=vol_horizon_scale,
+        ignore_index=dir_ignore_index,
     )
 
     # ── Regime labels ─────────────────────────────────────────────────────
