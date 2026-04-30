@@ -107,6 +107,10 @@ def get_fold_loaders(
     shuffle_train: bool = True,
     n_dir_classes: int = 2,
     dir_n_forward: int = 5,
+    dir_label_mode: str = "sign",
+    dir_vol_k: float = 0.50,
+    dir_vol_col: str = "rolling_vol_20",
+    dir_ignore_index: int = -1,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Loads train/val/test CSVs from fold_dir, applies the full feature
@@ -165,11 +169,25 @@ def get_fold_loaders(
             )
 
     # ── Direction labels ──────────────────────────────────────────────────
-    # dir_n_forward-day cumulative log return used as the direction signal.
-    # The last dir_n_forward rows will be NaN (no complete forward window);
-    # nan_to_num converts them to class 0, which affects at most dir_n_forward
-    # samples out of ~1200+ — negligible contamination.
+    # Last dir_n_forward rows do not have complete future returns.
+    # In vol_threshold mode they become neutral/ignored labels (-1).
+    # In sign mode they remain assigned by the legacy binary behavior.
+    if dir_label_mode == "vol_threshold":
+        for split_name, split_df in (("train", train_df), ("val", val_df), ("test", test_df)):
+            if dir_vol_col not in split_df.columns:
+                raise KeyError(
+                    f"{split_name} split is missing dir_vol_col={dir_vol_col!r} "
+                    "required for vol_threshold direction labels."
+                )
+            finite = np.isfinite(split_df[dir_vol_col].replace([np.inf, -np.inf], np.nan))
+            if not finite.any():
+                raise ValueError(
+                    f"{split_name} split has no finite values in dir_vol_col={dir_vol_col!r}."
+                )
+
     train_fwd_dir = _fwd_return(train_df, dir_n_forward).values
+    val_fwd_dir = _fwd_return(val_df, dir_n_forward).values
+    test_fwd_dir = _fwd_return(test_df, dir_n_forward).values
     train_fwd_dir_finite = train_fwd_dir[np.isfinite(train_fwd_dir)]
     if train_fwd_dir_finite.size == 0:
         raise ValueError(
@@ -177,20 +195,20 @@ def get_fold_loaders(
             f"(dir_n_forward={dir_n_forward})."
         )
 
+    train_vol = train_df[dir_vol_col].values if dir_label_mode == "vol_threshold" else None
+    val_vol = val_df[dir_vol_col].values if dir_label_mode == "vol_threshold" else None
+    test_vol = test_df[dir_vol_col].values if dir_label_mode == "vol_threshold" else None
     train_dir_all, lo, hi = make_direction_labels(
-        train_fwd_dir_finite,
-        train_fwd_dir,
-        n_classes=n_dir_classes,
+        train_fwd_dir_finite, train_fwd_dir, n_classes=n_dir_classes,
+        label_mode=dir_label_mode, eval_vol=train_vol, vol_k=dir_vol_k, ignore_index=dir_ignore_index
     )
     val_dir_all, _, _ = make_direction_labels(
-        train_fwd_dir_finite,
-        _fwd_return(val_df, dir_n_forward).values,
-        n_classes=n_dir_classes,
+        train_fwd_dir_finite, val_fwd_dir, n_classes=n_dir_classes,
+        label_mode=dir_label_mode, eval_vol=val_vol, vol_k=dir_vol_k, ignore_index=dir_ignore_index
     )
     test_dir_all, _, _ = make_direction_labels(
-        train_fwd_dir_finite,
-        _fwd_return(test_df, dir_n_forward).values,
-        n_classes=n_dir_classes,
+        train_fwd_dir_finite, test_fwd_dir, n_classes=n_dir_classes,
+        label_mode=dir_label_mode, eval_vol=test_vol, vol_k=dir_vol_k, ignore_index=dir_ignore_index
     )
 
     # ── Regime labels ─────────────────────────────────────────────────────

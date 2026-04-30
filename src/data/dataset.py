@@ -3,7 +3,7 @@ SPYWindowDataset — sliding-window dataset built from one fold split.
 
 Each sample is a W-day feature window plus two aligned labels for the
 last day of that window:
-    y_dir : n-day forward direction (0=Down, 1=Up); binary by default
+    y_dir : n-day forward direction (0=Down, 1=Up, -1=Neutral/ignored)
     y_reg : HMM regime label at the last window day (0..K-1, K=4)
 
 Label alignment note:
@@ -34,8 +34,9 @@ class SPYWindowDataset(Dataset):
     Args:
         features      : (n_rows, d_feat+d_sent) float32 — normalized features
         regime_labels : (n_rows,) int64 — HMM state per row
-        dir_labels    : (n_rows,) int64 — n-day forward direction label per row
-                        dir_labels[i] = Up/Down over dir_n_forward days from i
+        dir_labels    : (n_rows,) int64 — n-day forward direction label per row.
+                        In vol_threshold mode, -1 means neutral/no-event and is
+                        ignored by direction CE.
         window_size   : W (number of consecutive days per sample)
     """
 
@@ -59,7 +60,7 @@ class SPYWindowDataset(Dataset):
         """
         Returns:
             x     : (W, n_feat) float32 tensor — feature window
-            y_dir : int — direction label at last window day (0=Down, 1=Up)
+            y_dir : int — direction label at last window day (0=Down, 1=Up, -1=ignored)
             y_reg : int — regime label at last window day (0..K-1)
         """
         x = torch.from_numpy(self.features[idx : idx + self.W])  # (W, n_feat)

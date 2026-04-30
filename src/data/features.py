@@ -175,6 +175,10 @@ def make_direction_labels(
     q_low: float = 0.40,
     q_high: float = 0.60,
     n_classes: int = 2,
+    label_mode: str = "sign",
+    eval_vol: np.ndarray | None = None,
+    vol_k: float = 0.50,
+    ignore_index: int = -1,
 ) -> Tuple[np.ndarray, float, float]:
     """
     Builds direction labels for the target split.
@@ -208,13 +212,43 @@ def make_direction_labels(
         lo     : lower threshold (0.0 for binary mode)
         hi     : upper threshold (0.0 for binary mode)
     """
-    if n_classes == 2:
-        labels = (eval_ret > 0).astype(np.int64)
+    if label_mode == "sign":
+        if n_classes != 2:
+            raise ValueError("label_mode='sign' requires n_classes=2.")
+        labels = np.where(np.isfinite(eval_ret) & (eval_ret > 0.0), 1, 0).astype(np.int64)
         return labels, 0.0, 0.0
 
-    lo = float(np.quantile(train_ret, q_low))
-    hi = float(np.quantile(train_ret, q_high))
-    labels = np.where(eval_ret < lo, 0, np.where(eval_ret > hi, 2, 1)).astype(np.int64)
-    return labels, lo, hi
+    if label_mode == "vol_threshold":
+        if n_classes != 2:
+            raise ValueError("label_mode='vol_threshold' requires n_classes=2.")
+        if eval_vol is None:
+            raise ValueError("eval_vol must be provided when label_mode='vol_threshold'.")
+        if vol_k < 0:
+            raise ValueError("vol_k must be non-negative.")
 
+        eval_ret = np.asarray(eval_ret, dtype=np.float64)
+        eval_vol = np.asarray(eval_vol, dtype=np.float64)
+        if eval_ret.shape[0] != eval_vol.shape[0]:
+            raise ValueError(
+                f"eval_ret/eval_vol length mismatch: {eval_ret.shape[0]} vs {eval_vol.shape[0]}"
+            )
+        threshold = vol_k * np.abs(eval_vol)
+        valid = np.isfinite(eval_ret) & np.isfinite(threshold)
+        labels = np.full(eval_ret.shape, ignore_index, dtype=np.int64)
+        labels[valid & (eval_ret > threshold)] = 1
+        labels[valid & (eval_ret < -threshold)] = 0
+        return labels, float(-vol_k), float(vol_k)
+
+    if label_mode == "quantile_3class":
+        if n_classes != 3:
+            raise ValueError("label_mode='quantile_3class' requires n_classes=3.")
+        lo = float(np.quantile(train_ret, q_low))
+        hi = float(np.quantile(train_ret, q_high))
+        labels = np.where(eval_ret < lo, 0, np.where(eval_ret > hi, 2, 1)).astype(np.int64)
+        return labels, lo, hi
+
+    raise ValueError(
+        f"Unknown label_mode={label_mode!r}. "
+        "Use 'sign', 'vol_threshold', or 'quantile_3class'."
+    )
 

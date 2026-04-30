@@ -143,6 +143,10 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         dir_label_smoothing=args.dir_label_smoothing,
         dir_head_hidden=args.dir_head_hidden,
         use_task_specific_heads=args.use_task_specific_heads,
+        dir_label_mode=args.dir_label_mode,
+        dir_vol_k=args.dir_vol_k,
+        dir_vol_col=args.dir_vol_col,
+        dir_ignore_index=args.dir_ignore_index,
     )
 
 
@@ -188,6 +192,8 @@ def _run_epoch(
         "dir_loss": 0.0,
         "reg_loss": 0.0,
         "dir_correct": 0.0,
+        "dir_event_count": 0.0,
+        "dir_total_count": 0.0,
         "reg_correct": 0.0,
         "num_samples": 0,
     }
@@ -226,11 +232,17 @@ def _run_epoch(
         batch_size = int(x.shape[0])
         totals["num_samples"] += batch_size
         totals["total_loss"] += info["total_loss"] * batch_size
-        totals["dir_loss"] += info["dir_loss"] * batch_size
+        dir_events_for_loss = int(info.get("dir_event_count", 0.0))
+        if dir_events_for_loss > 0:
+            totals["dir_loss"] += info["dir_loss"] * dir_events_for_loss
         totals["reg_loss"] += info["reg_loss"] * batch_size
-        totals["dir_correct"] += (
-            (out["dir_logits"].argmax(dim=1) == targets["y_dir"]).sum().item()
-        )
+        dir_mask = targets["y_dir"] != model.config.dir_ignore_index
+        dir_events = int(dir_mask.sum().item())
+        totals["dir_event_count"] += dir_events
+        totals["dir_total_count"] += int(targets["y_dir"].numel())
+        if dir_events > 0:
+            dir_pred = out["dir_logits"].argmax(dim=1)
+            totals["dir_correct"] += ((dir_pred[dir_mask] == targets["y_dir"][dir_mask]).sum().item())
         totals["reg_correct"] += (
             (out["reg_logits"].argmax(dim=1) == targets["y_reg"]).sum().item()
         )
@@ -239,11 +251,15 @@ def _run_epoch(
         raise ValueError("Epoch completed with zero samples. Check data and batch limits.")
 
     n = float(totals["num_samples"])
+    dir_event_count = float(totals["dir_event_count"])
+    dir_total_count = float(totals["dir_total_count"])
     return {
         "total_loss": totals["total_loss"] / n,
-        "dir_loss": totals["dir_loss"] / n,
+        "dir_loss": (totals["dir_loss"] / dir_event_count if dir_event_count > 0 else float("nan")),
         "reg_loss": totals["reg_loss"] / n,
-        "dir_acc": totals["dir_correct"] / n,
+        "dir_acc": (totals["dir_correct"] / dir_event_count if dir_event_count > 0 else float("nan")),
+        "dir_event_count": dir_event_count,
+        "dir_coverage": (dir_event_count / dir_total_count if dir_total_count > 0 else float("nan")),
         "reg_acc": totals["reg_correct"] / n,
         "num_samples": float(totals["num_samples"]),
     }
@@ -260,7 +276,7 @@ def _collect_split_predictions(
     Collect per-sample predictions/targets for a split in dataloader order.
 
     Returns:
-        dict with y_dir_true, y_dir_pred, y_reg_true, y_reg_pred.
+        dict with y_dir_true (includes -1 ignored labels), y_dir_pred, y_reg_true, y_reg_pred.
     """
     model.eval()
     y_dir_true: list[np.ndarray] = []
@@ -292,46 +308,39 @@ def _collect_split_predictions(
     }
 
 
-def _export_test_predictions(
+def _direction_event_metrics(y_true: np.ndarray, y_pred: np.ndarray, ignore_index: int = -1) -> dict[str, float]:
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    mask = y_true != ignore_index
+    n_total = int(y_true.shape[0])
+    n_event = int(mask.sum())
+    if n_event == 0:
+        return {"dir_event_count": 0.0, "dir_coverage": 0.0, "dir_acc_event": float("nan"), "dir_mae_event": float("nan"), "dir_up_rate_event": float("nan"), "dir_pred_up_rate_event": float("nan"), "dir_majority_acc_event": float("nan"), "dir_acc_minus_majority_event": float("nan")}
+    yt = y_true[mask].astype(np.int64)
+    yp = y_pred[mask].astype(np.int64)
+    up_rate = float(np.mean(yt == 1))
+    acc = float(np.mean(yt == yp))
+    return {"dir_event_count": float(n_event), "dir_coverage": float(n_event / n_total) if n_total > 0 else float("nan"), "dir_acc_event": acc, "dir_mae_event": float(np.mean(np.abs(yt - yp))), "dir_up_rate_event": up_rate, "dir_pred_up_rate_event": float(np.mean(yp == 1)), "dir_majority_acc_event": float(max(up_rate, 1.0 - up_rate)), "dir_acc_minus_majority_event": float(acc - max(up_rate, 1.0 - up_rate))}
+
+def _export_split_predictions(
     model: MarketTransformer,
-    test_loader: DataLoader,
+    split_name: str,
+    dataloader: DataLoader,
     fold_dir: Path,
     output_dir: Path,
     config: TransformerConfig,
     variant: str,
     device: torch.device,
-) -> int:
-    """
-    Save per-sample test targets and predictions for downstream diagnostics (e.g., MAE).
-    """
-    preds = _collect_split_predictions(
-        model=model,
-        dataloader=test_loader,
-        device=device,
-        variant=variant,
-        d_feat=config.d_feat,
-    )
+) -> tuple[int, dict[str, float]]:
+    preds = _collect_split_predictions(model=model, dataloader=dataloader, device=device, variant=variant, d_feat=config.d_feat)
     n_samples = int(preds["y_dir_true"].shape[0])
-
     split_dates = _load_split_dates(fold_dir=fold_dir)
-    # Dataset labels are aligned to window end indices [W-1, ..., n_rows-2], so drop final row.
-    aligned_dates = split_dates["test"][config.window_size - 1 : -1].to_numpy(dtype="datetime64[ns]")
+    aligned_dates = split_dates[split_name][config.window_size - 1 : -1].to_numpy(dtype="datetime64[ns]")
     if aligned_dates.shape[0] != n_samples:
-        raise RuntimeError(
-            f"Prediction/date mismatch for test split: {n_samples} vs {aligned_dates.shape[0]}"
-        )
-
-    pred_df = pd.DataFrame(
-        {
-            "date": pd.to_datetime(aligned_dates),
-            "y_dir_true": preds["y_dir_true"],
-            "y_dir_pred": preds["y_dir_pred"],
-            "y_reg_true": preds["y_reg_true"],
-            "y_reg_pred": preds["y_reg_pred"],
-        }
-    )
-    pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
-    return n_samples
+        raise RuntimeError(f"Prediction/date mismatch for {split_name} split: {n_samples} vs {aligned_dates.shape[0]}")
+    pred_df = pd.DataFrame({"date": pd.to_datetime(aligned_dates), "y_dir_true": preds["y_dir_true"], "y_dir_pred": preds["y_dir_pred"], "is_dir_event": preds["y_dir_true"] != config.dir_ignore_index, "y_reg_true": preds["y_reg_true"], "y_reg_pred": preds["y_reg_pred"]})
+    pred_df.to_csv(output_dir / f"{split_name}_predictions.csv", index=False)
+    return n_samples, _direction_event_metrics(preds["y_dir_true"], preds["y_dir_pred"], ignore_index=config.dir_ignore_index)
 
 
 def _save_checkpoint(
@@ -561,6 +570,10 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             shuffle_train=args.shuffle_train,
             n_dir_classes=config.n_dir_classes,
             dir_n_forward=args.dir_n_forward,
+            dir_label_mode=config.dir_label_mode,
+            dir_vol_k=config.dir_vol_k,
+            dir_vol_col=config.dir_vol_col,
+            dir_ignore_index=config.dir_ignore_index,
         )
 
         feature_dim = int(train_loader.dataset.features.shape[1])
@@ -717,14 +730,11 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             optimizer=None,
             max_batches=args.max_eval_batches,
         )
-        test_pred_rows = _export_test_predictions(
-            model=model,
-            test_loader=test_loader,
-            fold_dir=fold_dir,
-            output_dir=fold_output,
-            config=config,
-            variant=args.variant,
-            device=device,
+        val_pred_rows, val_event_metrics = _export_split_predictions(
+            model=model, split_name="val", dataloader=val_loader, fold_dir=fold_dir, output_dir=fold_output, config=config, variant=args.variant, device=device
+        )
+        test_pred_rows, test_event_metrics = _export_split_predictions(
+            model=model, split_name="test", dataloader=test_loader, fold_dir=fold_dir, output_dir=fold_output, config=config, variant=args.variant, device=device
         )
 
         latent_counts = _export_fold_latents(
@@ -752,7 +762,14 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             "test_dir_acc": float(test_metrics["dir_acc"]),
             "test_reg_acc": float(test_metrics["reg_acc"]),
             "test_num_samples": int(test_metrics["num_samples"]),
+            "dir_label_mode": config.dir_label_mode,
+            "dir_vol_k": float(config.dir_vol_k),
+            "dir_vol_col": config.dir_vol_col,
+            "dir_ignore_index": int(config.dir_ignore_index),
+            "val_pred_rows": int(val_pred_rows),
             "test_pred_rows": int(test_pred_rows),
+            **{f"val_{k}": v for k, v in val_event_metrics.items()},
+            **{f"test_{k}": v for k, v in test_event_metrics.items()},
             **latent_counts,
         }
 
@@ -878,6 +895,15 @@ def parse_args(
         help="Direction label horizon in trading days (default 5). "
              "5-day forward returns have stronger momentum signal than 1-day.",
     )
+    parser.add_argument(
+        "--dir-label-mode",
+        type=str,
+        default="sign",
+        choices=["sign", "vol_threshold", "quantile_3class"],
+    )
+    parser.add_argument("--dir-vol-k", type=float, default=0.50)
+    parser.add_argument("--dir-vol-col", type=str, default="rolling_vol_20")
+    parser.add_argument("--dir-ignore-index", type=int, default=-1)
     parser.add_argument(
         "--use-task-specific-heads",
         action="store_true",
