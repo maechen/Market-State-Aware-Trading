@@ -89,8 +89,8 @@ class TransformerConfig:
     # λ_dir=2.0 gives direction priority in the gradient budget.
     # λ_reg=0.3: the CrossAttentionGate is slightly less efficient at preserving
     # regime-discriminative features than the multiplicative MASTER gate.
-    lambda_dir: float = 2.0
-    lambda_reg: float = 0.3
+    lambda_dir: float = 0.25
+    lambda_reg: float = 1.0
 
     # Label smoothing disabled (was 0.1): added ~0.11 nats to the floor of an already-
     # failing direction head, making optimisation harder with no benefit at this stage.

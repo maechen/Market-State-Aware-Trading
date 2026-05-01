@@ -98,8 +98,8 @@ def test_cross_attn_gate_mode_selectable():
 def test_lambda_defaults():
     """Loss is direction focal-CE + regime CE with no auxiliary tasks."""
     cfg = TransformerConfig()
-    assert cfg.lambda_dir == 2.0
-    assert cfg.lambda_reg == 0.3
+    assert cfg.lambda_dir == 0.25
+    assert cfg.lambda_reg == 1.0
 
 
 def test_use_task_specific_heads_default():

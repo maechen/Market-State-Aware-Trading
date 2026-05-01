@@ -101,7 +101,7 @@ def test_compute_loss_components_are_nonnegative():
 
 
 def test_compute_loss_total_equals_weighted_sum():
-    cfg = TransformerConfig(lambda_dir=1.0, lambda_reg=0.5)
+    cfg = TransformerConfig(lambda_dir=0.25, lambda_reg=1.0)
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
