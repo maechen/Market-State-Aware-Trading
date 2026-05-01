@@ -5,8 +5,9 @@ from src.models.transformer.config import TransformerConfig, GateMode, ReadoutMo
 
 
 def test_default_d_feat():
+    """16 price/tech features: 10 z-scored + 1 RSI + 1 BB%B + 4 regime probs."""
     cfg = TransformerConfig()
-    assert cfg.d_feat == 7
+    assert cfg.d_feat == 16
 
 
 def test_default_d_sent():
@@ -15,8 +16,9 @@ def test_default_d_sent():
 
 
 def test_total_input_width():
+    """19 total: 16 price/tech + 3 sentiment."""
     cfg = TransformerConfig()
-    assert cfg.d_feat + cfg.d_sent == 10
+    assert cfg.d_feat + cfg.d_sent == 19
 
 
 def test_default_d_model():
@@ -42,7 +44,7 @@ def test_default_d_z():
 
 def test_default_n_layers():
     cfg = TransformerConfig()
-    assert cfg.n_layers == 2
+    assert cfg.n_layers == 3
 
 
 def test_default_n_heads():
@@ -55,14 +57,14 @@ def test_default_gate_mode_is_cross_attn():
     assert cfg.gate_mode == GateMode.CROSS_ATTN
 
 
-def test_default_readout_mode_is_last():
+def test_default_readout_mode_is_attn_pool():
     cfg = TransformerConfig()
-    assert cfg.readout_mode == ReadoutMode.LAST
+    assert cfg.readout_mode == ReadoutMode.ATTN_POOL
 
 
 def test_default_n_dir_classes():
     cfg = TransformerConfig()
-    assert cfg.n_dir_classes == 3
+    assert cfg.n_dir_classes == 2
 
 
 def test_default_n_reg_classes():
@@ -94,10 +96,32 @@ def test_cross_attn_gate_mode_selectable():
 
 
 def test_lambda_defaults():
+    """Loss is direction focal-CE + regime CE with no auxiliary tasks."""
     cfg = TransformerConfig()
-    assert cfg.lambda_dir == 0.5
+    assert cfg.lambda_dir == 0.25
     assert cfg.lambda_reg == 1.0
-    assert cfg.lambda_ret == 0.3
+
+
+def test_use_task_specific_heads_default():
+    """Direction head bypasses the 64→16 bottleneck projection by default."""
+    cfg = TransformerConfig()
+    assert cfg.use_task_specific_heads is True
+
+
+def test_focal_gamma_default():
+    """Focal loss exponent defaults to 2.0 for direction head."""
+    cfg = TransformerConfig()
+    assert cfg.focal_gamma == 2.0
+
+
+def test_task_specific_heads_can_be_disabled():
+    cfg = TransformerConfig(use_task_specific_heads=False)
+    assert cfg.use_task_specific_heads is False
+
+
+def test_focal_gamma_zero_is_allowed():
+    cfg = TransformerConfig(focal_gamma=0.0)
+    assert cfg.focal_gamma == 0.0
 
 
 def test_dir_quantile_defaults():
@@ -118,3 +142,33 @@ def test_dir_label_smoothing_default():
     """Label smoothing disabled by default to avoid raising the loss floor."""
     cfg = TransformerConfig()
     assert cfg.dir_label_smoothing == 0.0
+
+
+def test_dir_entropy_coeff_default():
+    """Entropy regularisation defaults to 0.3 to overcome fold5/7/8 directional bias."""
+    cfg = TransformerConfig()
+    assert cfg.dir_entropy_coeff == 0.3
+
+
+def test_dir_entropy_coeff_can_be_disabled():
+    cfg = TransformerConfig(dir_entropy_coeff=0.0)
+    assert cfg.dir_entropy_coeff == 0.0
+
+
+def test_d_feat_default_includes_momentum_and_regime():
+    """d_feat=16: 10 scaled + 1 RSI + 1 BB%B + 4 regime_prob pass-through."""
+    cfg = TransformerConfig()
+    assert cfg.d_feat == 16
+
+
+def test_n_dir_classes_default_binary():
+    """Default direction head is binary (up/down) to avoid quantile distribution shift."""
+    cfg = TransformerConfig()
+    assert cfg.n_dir_classes == 2
+
+
+def test_n_dir_classes_can_be_three():
+    cfg = TransformerConfig(n_dir_classes=3)
+    assert cfg.n_dir_classes == 3
+
+

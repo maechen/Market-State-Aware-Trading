@@ -17,7 +17,6 @@ def make_targets(cfg: TransformerConfig, batch: int = B) -> dict:
     return {
         "y_dir": torch.randint(0, cfg.n_dir_classes, (batch,)),
         "y_reg": torch.randint(0, cfg.n_reg_classes, (batch,)),
-        "y_ret_std": torch.randn(batch),
     }
 
 
@@ -40,39 +39,38 @@ def test_output_shapes(gate_mode, readout_mode):
     assert out["z_pre"].shape == (B, cfg.d_z)
     assert out["dir_logits"].shape == (B, cfg.n_dir_classes)
     assert out["reg_logits"].shape == (B, cfg.n_reg_classes)
-    assert out["ret_pred"].shape == (B, 1)
 
 
 def test_output_has_all_keys():
     cfg = TransformerConfig()
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
-    for key in ("z", "z_pre", "dir_logits", "reg_logits", "ret_pred"):
+    for key in ("z", "z_pre", "dir_logits", "reg_logits"):
         assert key in out, f"Missing key: {key}"
 
 
-# ── z bounds ─────────────────────────────────────────────────────────────────
+# ── z properties (linear projection, no tanh) ────────────────────────────────
 
-def test_z_is_bounded():
+def test_z_and_z_pre_are_identical():
+    """Bottleneck is now a plain linear projection; z and z_pre must be identical."""
     cfg = TransformerConfig()
     model = MarketTransformer(cfg)
     model.eval()
     with torch.no_grad():
         out = model(make_input(cfg))
-    assert (out["z"] >= -1.0).all() and (out["z"] <= 1.0).all()
+    assert torch.allclose(out["z"], out["z_pre"], atol=1e-6), \
+        "z and z_pre should be the same tensor without tanh activation"
 
 
-def test_z_pre_can_be_unbounded():
-    """z_pre should not be constrained to [-1, 1]."""
+def test_z_is_unbounded_for_large_inputs():
+    """Without tanh, z can take values outside [-1, 1] for large-magnitude inputs."""
     cfg = TransformerConfig()
     model = MarketTransformer(cfg)
-    # Use large-magnitude input to encourage large z_pre values
-    x = make_input(cfg) * 50.0
     model.eval()
+    x = make_input(cfg) * 50.0
     with torch.no_grad():
         out = model(x)
-    # z should still be bounded
-    assert (out["z"] >= -1.0).all() and (out["z"] <= 1.0).all()
+    assert out["z_pre"].shape == (B, cfg.d_z)
 
 
 # ── Loss computation ──────────────────────────────────────────────────────────
@@ -90,7 +88,7 @@ def test_compute_loss_dict_has_expected_keys():
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
-    for key in ("dir_loss", "reg_loss", "ret_loss", "total_loss"):
+    for key in ("dir_loss", "reg_loss", "total_loss"):
         assert key in info, f"Missing loss key: {key}"
 
 
@@ -99,19 +97,16 @@ def test_compute_loss_components_are_nonnegative():
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
-    assert info["dir_loss"] >= 0
     assert info["reg_loss"] >= 0
-    assert info["ret_loss"] >= 0
 
 
 def test_compute_loss_total_equals_weighted_sum():
-    cfg = TransformerConfig(lambda_dir=1.0, lambda_reg=0.5, lambda_ret=0.5)
+    cfg = TransformerConfig(lambda_dir=0.25, lambda_reg=1.0)
     model = MarketTransformer(cfg)
     out = model(make_input(cfg))
     _, info = model.compute_loss(out, make_targets(cfg))
     expected = (cfg.lambda_dir * info["dir_loss"]
-                + cfg.lambda_reg * info["reg_loss"]
-                + cfg.lambda_ret * info["ret_loss"])
+                + cfg.lambda_reg * info["reg_loss"])
     assert abs(info["total_loss"] - expected) < 1e-5
 
 
@@ -125,7 +120,6 @@ def test_gradient_flows_end_to_end(gate_mode):
     out = model(x)
     loss, _ = model.compute_loss(out, make_targets(cfg))
     loss.backward()
-    # Every parameter with requires_grad should have a gradient
     for name, p in model.named_parameters():
         if p.requires_grad:
             assert p.grad is not None, f"No gradient for parameter: {name}"
@@ -137,8 +131,6 @@ def test_causal_property_of_transformer_stack():
     """
     With a causal mask, changing positions t=5..W-1 in the input must NOT
     change the transformer hidden states at positions 0..4.
-    The final model output uses only the last hidden state, but we can check
-    the internal stack directly via partial forward.
     """
     from src.models.transformer.layers import make_causal_mask, TransformerStack
 
@@ -203,3 +195,82 @@ def test_no_decay_group_has_zero_weight_decay():
     model = MarketTransformer(cfg)
     groups = model.configure_optimizers(lr=1e-3, weight_decay=1e-4)
     assert groups[1]["weight_decay"] == 0.0
+
+
+# ── Task-specific head bypass ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("gate_mode", GATE_MODES)
+def test_task_specific_heads_output_shapes(gate_mode):
+    """use_task_specific_heads=True (default) must produce correct output shapes."""
+    cfg = TransformerConfig(gate_mode=gate_mode, use_task_specific_heads=True)
+    model = MarketTransformer(cfg)
+    model.eval()
+    with torch.no_grad():
+        out = model(make_input(cfg))
+    assert out["dir_logits"].shape == (B, cfg.n_dir_classes)
+    assert out["z"].shape == (B, cfg.d_z)
+
+
+@pytest.mark.parametrize("gate_mode", GATE_MODES)
+def test_no_task_specific_heads_output_shapes(gate_mode):
+    """use_task_specific_heads=False (backward compat) must also produce correct shapes."""
+    cfg = TransformerConfig(gate_mode=gate_mode, use_task_specific_heads=False)
+    model = MarketTransformer(cfg)
+    model.eval()
+    with torch.no_grad():
+        out = model(make_input(cfg))
+    assert out["dir_logits"].shape == (B, cfg.n_dir_classes)
+    assert out["z"].shape == (B, cfg.d_z)
+
+
+def test_task_specific_heads_gradient_flows_to_dir_head():
+    """
+    With use_task_specific_heads=True the direction head reads from h_pooled, so
+    its parameters must receive non-zero gradients independently of the bottleneck.
+    """
+    cfg = TransformerConfig(use_task_specific_heads=True)
+    model = MarketTransformer(cfg)
+    out = model(make_input(cfg))
+    loss, _ = model.compute_loss(out, make_targets(cfg))
+    loss.backward()
+    for name, p in model.dir_head.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None and p.grad.abs().sum() > 0, \
+                f"No gradient for dir_head parameter: {name}"
+
+
+# ── Focal loss ────────────────────────────────────────────────────────────────
+
+def test_focal_gamma_zero_gives_finite_loss():
+    """focal_gamma=0 reduces to standard cross-entropy; total loss must be finite."""
+    cfg = TransformerConfig(focal_gamma=0.0)
+    model = MarketTransformer(cfg)
+    out = model(make_input(cfg))
+    loss, info = model.compute_loss(out, make_targets(cfg))
+    assert torch.isfinite(loss), "Loss not finite with focal_gamma=0"
+    assert info["reg_loss"] >= 0
+
+
+def test_focal_gamma_positive_gives_finite_loss():
+    """focal_gamma=2.0 (default) must produce a finite total loss.
+    dir_loss can be negative when dir_entropy_coeff>0 (entropy regulariser subtracts
+    from the raw focal loss to prevent mode collapse — this is intentional)."""
+    cfg = TransformerConfig(focal_gamma=2.0)
+    model = MarketTransformer(cfg)
+    out = model(make_input(cfg))
+    loss, info = model.compute_loss(out, make_targets(cfg))
+    assert torch.isfinite(loss), "Loss not finite with focal_gamma=2"
+
+
+def test_focal_loss_is_lower_than_standard_ce_on_easy_samples():
+    """
+    Focal loss should assign lower weight to easy (high-confidence correct) samples.
+    """
+    from src.models.transformer.model import _focal_cross_entropy
+
+    logits = torch.tensor([[2.5, -1.0, -1.0]] * 8)
+    targets = torch.zeros(8, dtype=torch.long)
+
+    focal = _focal_cross_entropy(logits, targets, gamma=2.0).item()
+    ce = torch.nn.functional.cross_entropy(logits, targets).item()
+    assert focal < ce, f"Expected focal ({focal:.6f}) < CE ({ce:.6f}) on easy samples"

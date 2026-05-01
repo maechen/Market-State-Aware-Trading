@@ -1,9 +1,13 @@
 """
 get_fold_loaders — build train/val/test DataLoaders for one walk-forward fold.
 
-All normalization statistics (scaler mean/std, direction thresholds, return
-mean/std) are computed from the training split only and applied uniformly
-to val and test — no future information leaks across splits.
+All normalization statistics (scaler mean/std, direction thresholds) are
+computed from the training split only and applied uniformly to val and test
+— no future information leaks across splits.
+
+The model predicts two targets:
+    direction : binary Up/Down (sign of dir_n_forward-day cumulative log return)
+    regime    : HMM state (0..K-1, K=4) from Viterbi decoding
 """
 
 import os
@@ -19,24 +23,26 @@ from .features import (
     derive_features,
     fit_scaler,
     make_direction_labels,
+    REGIME_PROB_COLS,
     SENT_COLS,
     UNBOUNDED_COLS,
-    standardize_returns,
 )
 
 def _required_raw_columns() -> list[str]:
     """
     Columns required to (a) build model features and (b) build labels.
 
-    Derived feature prerequisites come from `derive_features()` and the base
-    unbounded feature columns from `UNBOUNDED_COLS`.
-    Sentiment columns come from `SENT_COLS`.
-    Regime labels are required for the multitask head target.
+    Includes OHLCV columns (High, Low, Volume) needed by the new momentum
+    features (ATR, BB%B, volume ratio) computed in derive_features().
     """
-    # derive_features prerequisites
-    derived_prereqs = ["Adj Close", "ma_10", "ma_20", "ma_50", "rsi_14"]
-    # feature inputs used by scaling + sentiment pass-through
-    feature_inputs = list(UNBOUNDED_COLS) + list(SENT_COLS)
+    # derive_features prerequisites (OHLCV + MAs + RSI + MACD signal)
+    derived_prereqs = [
+        "Adj Close", "High", "Low", "Volume",
+        "ma_10", "ma_20", "ma_50",
+        "rsi_14", "macd", "macd_signal",
+    ]
+    # feature inputs: price/tech (unbounded) + regime probs + sentiment
+    feature_inputs = list(UNBOUNDED_COLS) + list(REGIME_PROB_COLS) + list(SENT_COLS)
     # supervised labels
     label_inputs = ["regime_label", "log_return"]
     # de-duplicate while preserving order
@@ -47,6 +53,24 @@ def _required_raw_columns() -> list[str]:
             required.append(col)
             seen.add(col)
     return required
+
+
+def _fwd_return(df: pd.DataFrame, n_forward: int) -> pd.Series:
+    """
+    Computes the n_forward-day cumulative log return for each row.
+
+    ``_fwd_return(df, n)[t]`` = log_return[t+1] + ... + log_return[t+n],
+    i.e. the total return over the next n trading days (the label horizon).
+    The last n rows will be NaN (no complete n-day window ahead of them).
+
+    Implementation note:
+        shift(-n) maps log_return[t+n] to index t.
+        .rolling(n).sum() then sums the n values ending at each index,
+        which (after the shift) corresponds to log_return[t+1]..log_return[t+n].
+    """
+    if n_forward == 1:
+        return df["log_return"].shift(-1)
+    return df["log_return"].shift(-n_forward).rolling(n_forward).sum()
 
 
 def _clean_split(df: pd.DataFrame, split_name: str) -> pd.DataFrame:
@@ -79,23 +103,32 @@ def get_fold_loaders(
     fold_dir: str,
     window_size: int = 20,
     batch_size: int = 64,
-    q_low: float = 0.40,
-    q_high: float = 0.60,
     num_workers: int = 0,
+    shuffle_train: bool = True,
+    n_dir_classes: int = 2,
+    dir_n_forward: int = 5,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Loads train/val/test CSVs from fold_dir, applies the full feature
     engineering + normalization pipeline, and returns three DataLoaders.
 
+    The model predicts direction (binary Up/Down) and regime (HMM state).
+    The auxiliary return regression head has been removed — after extensive
+    experimentation it consistently achieved standardised MAE ≈ 0.9 (random
+    predictions), causing gradient interference that degraded direction accuracy.
+
     Args:
-        fold_dir    : path to a directory containing
-                      spy_train_labeled.csv, spy_val_labeled.csv,
-                      spy_test_labeled.csv
-        window_size : W (lookback window)
-        batch_size  : DataLoader batch size
-        q_low       : lower quantile for direction neutral band
-        q_high      : upper quantile for direction neutral band
-        num_workers : DataLoader worker processes
+        fold_dir      : path to a directory containing
+                        spy_train_labeled.csv, spy_val_labeled.csv,
+                        spy_test_labeled.csv
+        window_size   : W (lookback window in trading days)
+        batch_size    : DataLoader batch size
+        q_low         : lower quantile for neutral band (3-class mode only)
+        q_high        : upper quantile for neutral band (3-class mode only)
+        num_workers   : DataLoader worker processes
+        shuffle_train : randomise training batch order (recommended)
+        n_dir_classes : 2 = binary Up/Down (default); 3 = Bear/Neutral/Bull
+        dir_n_forward : label horizon for direction target (days ahead, default 5)
 
     Returns:
         (train_loader, val_loader, test_loader)
@@ -131,41 +164,34 @@ def get_fold_loaders(
                 f"{split_name} features contain {bad} non-finite values after normalization."
             )
 
-    # ── Direction labels (quantile thresholds from training returns) ──────
-    # shift(-1) gives next-day return; drop last NaN for threshold fitting
-    train_next_ret = train_df["log_return"].shift(-1).iloc[:-1].values
-    train_next_ret = train_next_ret[np.isfinite(train_next_ret)]
-    if train_next_ret.size == 0:
-        raise ValueError("No finite training next-day returns available for label thresholds.")
+    # ── Direction labels ──────────────────────────────────────────────────
+    # dir_n_forward-day cumulative log return used as the direction signal.
+    # The last dir_n_forward rows will be NaN (no complete forward window);
+    # nan_to_num converts them to class 0, which affects at most dir_n_forward
+    # samples out of ~1200+ — negligible contamination.
+    train_fwd_dir = _fwd_return(train_df, dir_n_forward).values
+    train_fwd_dir_finite = train_fwd_dir[np.isfinite(train_fwd_dir)]
+    if train_fwd_dir_finite.size == 0:
+        raise ValueError(
+            f"No finite training forward returns for direction labels "
+            f"(dir_n_forward={dir_n_forward})."
+        )
 
     train_dir_all, lo, hi = make_direction_labels(
-        train_next_ret, train_df["log_return"].shift(-1).values, q_low, q_high
+        train_fwd_dir_finite,
+        train_fwd_dir,
+        n_classes=n_dir_classes,
     )
     val_dir_all, _, _ = make_direction_labels(
-        train_next_ret, val_df["log_return"].shift(-1).values, q_low, q_high
+        train_fwd_dir_finite,
+        _fwd_return(val_df, dir_n_forward).values,
+        n_classes=n_dir_classes,
     )
     test_dir_all, _, _ = make_direction_labels(
-        train_next_ret, test_df["log_return"].shift(-1).values, q_low, q_high
+        train_fwd_dir_finite,
+        _fwd_return(test_df, dir_n_forward).values,
+        n_classes=n_dir_classes,
     )
-
-    # ── Standardized return targets ───────────────────────────────────────
-    # shift(-1) produces NaN at the last position (no next-day return).
-    # nan_to_num replaces that sentinel NaN with 0 so SPYWindowDataset never
-    # hands a non-finite value to the DataLoader (the dataset math already
-    # prevents the last position from being sampled, but this is a belt-and-
-    # suspenders guard against any off-by-one edge case).
-    train_ret_std, _, _ = standardize_returns(
-        train_next_ret, train_df["log_return"].shift(-1).values
-    )
-    val_ret_std, _, _ = standardize_returns(
-        train_next_ret, val_df["log_return"].shift(-1).values
-    )
-    test_ret_std, _, _ = standardize_returns(
-        train_next_ret, test_df["log_return"].shift(-1).values
-    )
-    train_ret_std = np.nan_to_num(train_ret_std, nan=0.0, posinf=0.0, neginf=0.0)
-    val_ret_std   = np.nan_to_num(val_ret_std,   nan=0.0, posinf=0.0, neginf=0.0)
-    test_ret_std  = np.nan_to_num(test_ret_std,  nan=0.0, posinf=0.0, neginf=0.0)
 
     # ── Regime labels ─────────────────────────────────────────────────────
     train_reg = train_df["regime_label"].values.astype(np.int64)
@@ -173,9 +199,9 @@ def get_fold_loaders(
     test_reg = test_df["regime_label"].values.astype(np.int64)
 
     # ── Build datasets and loaders ────────────────────────────────────────
-    train_ds = SPYWindowDataset(train_feat, train_reg, train_dir_all, train_ret_std, window_size)
-    val_ds = SPYWindowDataset(val_feat, val_reg, val_dir_all, val_ret_std, window_size)
-    test_ds = SPYWindowDataset(test_feat, test_reg, test_dir_all, test_ret_std, window_size)
+    train_ds = SPYWindowDataset(train_feat, train_reg, train_dir_all, window_size)
+    val_ds = SPYWindowDataset(val_feat, val_reg, val_dir_all, window_size)
+    test_ds = SPYWindowDataset(test_feat, test_reg, test_dir_all, window_size)
     for split_name, ds in (("train", train_ds), ("val", val_ds), ("test", test_ds)):
         if len(ds) <= 0:
             raise ValueError(
@@ -183,7 +209,7 @@ def get_fold_loaders(
             )
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+        train_ds, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers

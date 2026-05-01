@@ -1,0 +1,14 @@
+{
+  "variant": "no_sentiment",
+  "window_size": 20,
+  "d_z": 16,
+  "split_order_for_all": [
+    "train",
+    "val",
+    "test"
+  ],
+  "latent_rows_train": 1239,
+  "latent_rows_val": 233,
+  "latent_rows_test": 93,
+  "latent_rows_all": 1565
+}

@@ -4,9 +4,11 @@ Market-State-Aware DRL using FinRL + DQN.
 This model uses:
 - SPY OHLCV
 - Technical indicators
-- Regime labels
-- 32D latent state vector (from transformer)
+- Regime probabilities (from HMM)
+- 16-dim latent state vector (from transformer bottleneck)
 
+Data is loaded fold-by-fold from the training fold CSVs and the
+transformer latent .npy files produced by run_gating.py (or similar).
 Walk-forward training and evaluation.
 """
 
@@ -43,14 +45,21 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from configs.walkforward_folds import FOLDS
-from spy.market_data_utils import create_walk_forward_split, load_data
 
-LATENT_DIM = 32
+# Matches transformer config.d_z (16 after bottleneck change from 32).
+LATENT_DIM = 16
 LATENT_COLUMNS = [f"latent_{i}" for i in range(LATENT_DIM)]
 REGIME_COLUMNS = ["regime_prob_0", "regime_prob_1", "regime_prob_2", "regime_prob_3"]
 
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
+# Static market indicator columns present in the fold training CSVs.
+# NOTE: weight, PnL, and drawdown are NOT listed here because they are
+# FinRL env-internal runtime quantities computed at each step() call —
+# they are never stored in pre-saved CSV files.  The env wrapper (see
+# _build_discrete_env) does append current_weight, step_return, and
+# fractional_drawdown to every observation at runtime, so the DQN policy
+# can still condition on portfolio exposure without CSV pre-loading.
 INDICATOR_COLUMNS = [
     "rsi_14",
     "macd",
@@ -59,9 +68,6 @@ INDICATOR_COLUMNS = [
     "ma_10",
     "ma_20",
     "ma_50",
-    "weight",
-    "PnL",
-    "drawdown",
 ]
 
 STATE_COLUMNS = [
@@ -78,10 +84,15 @@ class DQNConfig:
     learning_rate: float = 1e-4
     batch_size: int = 64
     buffer_size: int = 100_000
-    learning_starts: int = 1_000
+    # learning_starts raised from 1K → 2K: fill the replay buffer with more
+    # diverse transitions before the first gradient update.
+    learning_starts: int = 2_000
     train_freq: int = 4
     target_update_interval: int = 500
-    exploration_fraction: float = 0.1
+    # exploration_fraction raised from 0.1 → 0.3: with 200K timesteps and
+    # 252 days/year, 10% meant exploration stopped after ~20 episodes.
+    # 30% gives ~60 episodes of ε-greedy exploration before decay completes.
+    exploration_fraction: float = 0.3
     exploration_final_eps: float = 0.02
 
 
@@ -89,18 +100,35 @@ class DQNConfig:
 class DRLTrainingConfig:
     """Central config for market-state-aware DRL runs."""
 
-    # Data / IO
-    input_path: str = "data/spy_market_data.csv"
+    # Data / IO — fold CSVs + transformer latent npy files are loaded per fold.
+    fold_root: str = "data/training"
+    latent_root: str = "data/transformer_npy/gating"
     output_dir: str = "data/drl_results"
     ticker: str = "SPY"
 
     # Training / trading
-    train_timesteps: int = 50_000
+    # train_timesteps raised 50K → 200K: ~200 episodes at 252 steps each.
+    # State space: 1 (cash) + 2 (price, shares) + STATE_COLUMNS(32) = 35 base
+    # features; the env wrapper appends +3 (weight, step_return, drawdown) → 38 total.
+    # STATE_COLUMNS = OHLCV(5) + indicators(7) + regime_probs(4) + latent_z(16) = 32.
+    # The transformer bottleneck outputs 16-dim latent z; all other dims come from CSV.
+    train_timesteps: int = 200_000
     initial_amount: float = 10_000.0
     transaction_cost_pct: float = 1e-3
-    reward_scaling: float = 1e-4
+    # reward_scaling raised 1e-4 → 1e-3: the raw portfolio-delta reward for
+    # a $10K account is ~$10–$100/day; 1e-4 squashes this to 0.001–0.01,
+    # which is at the lower edge of useful Q-value range for DQN.
+    reward_scaling: float = 1e-3
     hmax: int = 100
     seed: int = 42
+
+    # Custom reward shaping: replaces FinRL's default (account_value_change *
+    # reward_scaling) with a Sortino-style shaped reward that penalises
+    # downside losses asymmetrically and adds a fixed cost per trade to
+    # discourage churn.  Set alpha=0 and beta=0 to revert to default reward.
+    # R_t = step_return - alpha * max(0, -step_return)^2 - beta * trade_flag
+    downside_penalty_alpha: float = 1.0
+    trade_penalty_beta: float = 1e-3
 
     # Discrete action grid for DQN
     action_grid: tuple[float, ...] = (-1.0, -0.5, 0.0, 0.5, 1.0)
@@ -148,10 +176,70 @@ def _resolve_folds(selected_folds: str | None, max_folds: int | None) -> list[di
     return resolved
 
 
+def _load_fold_split_with_latents(
+    fold_data_dir: Path,
+    latent_dir: Path,
+    split: str,
+) -> pd.DataFrame:
+    """
+    Load one fold split CSV and merge the transformer latent vectors by date.
+
+    The fold CSVs (spy_{split}_labeled.csv) contain OHLCV, technical
+    indicators, and regime probabilities.  The transformer latent .npy files
+    (latents_{split}.npy + dates_{split}.npy) are aligned to the last day of
+    each sliding window, so they start window_size-1 days into the split.
+    An inner join on date keeps only rows where both sources are available.
+
+    :param fold_data_dir: directory with spy_train/val/test_labeled.csv
+    :param latent_dir:    directory with latents_{split}.npy and dates_{split}.npy
+    :param split:         one of "train", "val", "test"
+    :return: merged DataFrame with OHLCV + indicators + regime + latent columns
+    """
+    csv_path = fold_data_dir / f"spy_{split}_labeled.csv"
+    df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+    df.index = pd.to_datetime(df.index)
+
+    latent_path = latent_dir / f"latents_{split}.npy"
+    dates_path = latent_dir / f"dates_{split}.npy"
+    if not latent_path.exists() or not dates_path.exists():
+        raise FileNotFoundError(
+            f"Transformer latent files not found in {latent_dir}. "
+            "Run the transformer training script (e.g. scripts/run_gating.py) "
+            f"first to generate latents_{split}.npy and dates_{split}.npy."
+        )
+
+    latents = np.load(latent_path)           # (N_windows, d_z)
+    dates_raw = np.load(dates_path, allow_pickle=True)  # (N_windows,)
+
+    actual_dim = latents.shape[1]
+    if actual_dim != LATENT_DIM:
+        raise ValueError(
+            f"Latent dimension mismatch: .npy has {actual_dim} dims but "
+            f"LATENT_DIM={LATENT_DIM}. Re-run transformer training or update LATENT_DIM."
+        )
+
+    latent_dates = pd.to_datetime(dates_raw)
+    latent_df = pd.DataFrame(
+        latents,
+        index=latent_dates,
+        columns=LATENT_COLUMNS,
+    )
+
+    merged = df.join(latent_df, how="inner")
+    if merged.empty:
+        raise ValueError(
+            f"No dates matched between the {split} CSV and the latent arrays "
+            f"in {latent_dir}. Check that the transformer run used the same fold."
+        )
+    return merged
+
+
 def prepare_finrl_dataframe(split_df: pd.DataFrame, ticker: str = "SPY") -> pd.DataFrame:
     """
-    Convert a split into FinRL stock env format, including regime labels
-    and 32D latent state vectors.
+    Convert a merged fold split DataFrame into FinRL StockTradingEnv format.
+
+    The input must already contain OHLCV + indicator + regime + latent columns
+    (produced by _load_fold_split_with_latents).
     """
     required_columns = [
         *OHLCV_COLUMNS,
@@ -290,33 +378,186 @@ def _build_discrete_env(
     split_df: pd.DataFrame,
     env_kwargs: dict,
     action_grid: tuple[float, ...],
+    downside_penalty_alpha: float = 1.0,
+    trade_penalty_beta: float = 1e-3,
 ):
     """
     Wrap continuous FinRL env with a discrete action interface for DQN.
+
+    Grid values are portfolio-weight deltas in [-1, 1].  The wrapper:
+      1. Converts each weight delta to the equivalent shares-to-trade.
+      2. Replaces FinRL's default reward with a shaped reward:
+         R_t = step_return - alpha * max(0, -step_return)^2 - beta * trade_flag
+         (Sortino-style: penalises losses asymmetrically; discourages churn)
+      3. Appends three portfolio diagnostics to the observation so the policy
+         can condition on its own exposure: current_weight ∈ [0,1],
+         step_return ∈ [-1,∞), fractional_drawdown ∈ [0,1].
     """
 
     class _DiscreteSingleAssetActionWrapper(gym_module.ActionWrapper):
-        def __init__(self, env, grid: tuple[float, ...]):
+        def __init__(
+            self,
+            env,
+            grid: tuple[float, ...],
+            downside_alpha: float,
+            trade_beta: float,
+        ):
             super().__init__(env)
-            # Map integer action IDs to fixed continuous values in [-1, 1].
             self._grid = np.asarray(grid, dtype=np.float32)
             self.action_space = gym_module.spaces.Discrete(len(self._grid))
-            # Keep history for fold diagnostics / CSV export.
+            self._downside_alpha = float(downside_alpha)
+            self._trade_beta = float(trade_beta)
+            self._previous_account_value = 0.0
+            self._running_peak_account_value = 0.0
+            self.observation_space = self._build_augmented_observation_space()
             self.discrete_action_history: list[int] = []
             self.continuous_action_history: list[float] = []
 
+        def _build_augmented_observation_space(self):
+            base_space = getattr(self.env, "observation_space", None)
+            dtype = np.float32
+            lower_bound = np.finfo(dtype).min
+            upper_bound = np.finfo(dtype).max
+
+            if isinstance(base_space, gym_module.spaces.Box):
+                base_low = np.asarray(base_space.low, dtype=dtype).reshape(-1)
+                base_high = np.asarray(base_space.high, dtype=dtype).reshape(-1)
+            else:
+                if base_space is not None and getattr(base_space, "shape", None):
+                    base_dim = int(np.prod(base_space.shape))
+                else:
+                    base_dim = int(len(np.asarray(getattr(self.env, "state", []), dtype=dtype)))
+                base_low = np.full(base_dim, lower_bound, dtype=dtype)
+                base_high = np.full(base_dim, upper_bound, dtype=dtype)
+
+            extra_low = np.asarray([0.0, -1.0, 0.0], dtype=dtype)
+            extra_high = np.asarray([1.0, upper_bound, 1.0], dtype=dtype)
+            return gym_module.spaces.Box(
+                low=np.concatenate([base_low, extra_low]),
+                high=np.concatenate([base_high, extra_high]),
+                dtype=dtype,
+            )
+
+        def _extract_portfolio_state(self) -> tuple[float, float, float, float]:
+            state = np.asarray(getattr(self.env, "state", []), dtype=float).reshape(-1)
+            if state.size < 3:
+                return 0.0, 0.0, 0.0, 0.0
+            cash = float(state[0]) if np.isfinite(state[0]) else 0.0
+            price = float(state[1]) if np.isfinite(state[1]) else 0.0
+            shares = float(state[2]) if np.isfinite(state[2]) else 0.0
+            account_value = cash + shares * price
+            return cash, price, shares, float(account_value) if np.isfinite(account_value) else 0.0
+
+        def _current_account_value(self) -> float:
+            asset_memory = getattr(self.env, "asset_memory", None)
+            if isinstance(asset_memory, list) and asset_memory:
+                latest = float(asset_memory[-1])
+                if np.isfinite(latest):
+                    return latest
+            _, _, _, account_value = self._extract_portfolio_state()
+            return account_value
+
+        def _current_weight(self) -> float:
+            _, price, shares, account_value = self._extract_portfolio_state()
+            if account_value <= 0.0:
+                return 0.0
+            weight = (shares * price) / account_value
+            return float(np.clip(weight, 0.0, 1.0)) if np.isfinite(weight) else 0.0
+
+        def _trade_executed(self) -> bool:
+            actions_memory = getattr(self.env, "actions_memory", None)
+            if isinstance(actions_memory, list) and actions_memory:
+                latest_trade = np.asarray(actions_memory[-1]).reshape(-1)
+                if latest_trade.size:
+                    return bool(np.any(np.abs(latest_trade) > 1e-12))
+            return False
+
         def action(self, action):
-            # DQN emits an integer action ID.
             idx = int(np.asarray(action).reshape(-1)[0])
             idx = int(np.clip(idx, 0, len(self._grid) - 1))
-            continuous_value = float(self._grid[idx])
+            weight_delta = float(self._grid[idx])
             self.discrete_action_history.append(idx)
-            self.continuous_action_history.append(continuous_value)
-            return np.asarray([continuous_value], dtype=np.float32)
+            self.continuous_action_history.append(weight_delta)
 
-    # Base FinRL env still handles portfolio accounting and reward logic.
+            # Convert weight delta → shares-to-trade for FinRL's action API.
+            _, price, shares, account_value = self._extract_portfolio_state()
+            if account_value <= 0.0 or price <= 0.0:
+                return np.asarray([0.0], dtype=np.float32)
+            current_weight = (shares * price) / account_value
+            target_weight = float(np.clip(current_weight + weight_delta, 0.0, 1.0))
+            target_shares = (target_weight * account_value) / price
+            delta_shares = target_shares - shares
+            hmax = float(getattr(self.env, "hmax", 1))
+            finrl_action = float(np.clip(delta_shares / hmax, -1.0, 1.0))
+            return np.asarray([finrl_action], dtype=np.float32)
+
+        def _augment_observation(self, observation, step_return: float, drawdown_frac: float):
+            obs_array = np.asarray(observation, dtype=np.float32).reshape(-1)
+            extra = np.asarray(
+                [self._current_weight(), step_return, max(0.0, drawdown_frac)],
+                dtype=np.float32,
+            )
+            return np.concatenate([obs_array, extra]).astype(np.float32, copy=False)
+
+        def reset(self, **kwargs):
+            reset_output = self.env.reset(**kwargs)
+            self.discrete_action_history.clear()
+            self.continuous_action_history.clear()
+            current_account_value = self._current_account_value()
+            if current_account_value <= 0.0:
+                current_account_value = float(getattr(self.env, "initial_amount", 0.0))
+            self._previous_account_value = current_account_value
+            self._running_peak_account_value = current_account_value
+            if isinstance(reset_output, tuple):
+                obs, info = reset_output
+                return self._augment_observation(obs, step_return=0.0, drawdown_frac=0.0), info
+            return self._augment_observation(reset_output, step_return=0.0, drawdown_frac=0.0)
+
+        def step(self, action):
+            previous_account_value = float(self._previous_account_value)
+            step_output = super().step(action)
+            current_account_value = self._current_account_value()
+            if not np.isfinite(current_account_value):
+                current_account_value = previous_account_value
+
+            step_return = (
+                current_account_value / previous_account_value - 1.0
+                if previous_account_value > 0.0
+                else 0.0
+            )
+            downside_penalty = self._downside_alpha * max(0.0, -step_return) ** 2
+            custom_reward = step_return - downside_penalty
+            if self._trade_executed():
+                custom_reward -= self._trade_beta
+
+            self._running_peak_account_value = max(
+                self._running_peak_account_value, current_account_value
+            )
+            drawdown_frac = (
+                (self._running_peak_account_value - current_account_value)
+                / self._running_peak_account_value
+                if self._running_peak_account_value > 0.0
+                else 0.0
+            )
+            self._previous_account_value = current_account_value
+
+            if len(step_output) == 5:
+                obs, _reward, terminated, truncated, info = step_output
+                aug_obs = self._augment_observation(obs, step_return=step_return, drawdown_frac=drawdown_frac)
+                return aug_obs, float(custom_reward), terminated, truncated, info
+            if len(step_output) == 4:
+                obs, _reward, done, info = step_output
+                aug_obs = self._augment_observation(obs, step_return=step_return, drawdown_frac=drawdown_frac)
+                return aug_obs, float(custom_reward), done, info
+            raise RuntimeError(f"Unexpected env.step output length: {len(step_output)}")
+
     base_env = stock_trading_env_cls(df=split_df, **env_kwargs)
-    wrapped_env = _DiscreteSingleAssetActionWrapper(base_env, action_grid)
+    wrapped_env = _DiscreteSingleAssetActionWrapper(
+        base_env,
+        action_grid,
+        downside_alpha=downside_penalty_alpha,
+        trade_beta=trade_penalty_beta,
+    )
     return wrapped_env, base_env
 
 
@@ -354,6 +595,8 @@ def train_fold_dqn(train_df: pd.DataFrame, config: DRLTrainingConfig):
         split_df=train_df,
         env_kwargs=env_kwargs,
         action_grid=config.action_grid,
+        downside_penalty_alpha=config.downside_penalty_alpha,
+        trade_penalty_beta=config.trade_penalty_beta,
     )
 
     dqn_cfg = config.dqn
@@ -421,6 +664,8 @@ def evaluate_dqn_on_split(
     gym_module,
     action_grid: tuple[float, ...],
     initial_amount: float,
+    downside_penalty_alpha: float = 1.0,
+    trade_penalty_beta: float = 1e-3,
     initial: bool = True,
     previous_state: list[float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[float]]:
@@ -441,6 +686,8 @@ def evaluate_dqn_on_split(
         split_df=split_df,
         env_kwargs=runtime_env_kwargs,
         action_grid=action_grid,
+        downside_penalty_alpha=downside_penalty_alpha,
+        trade_penalty_beta=trade_penalty_beta,
     )
 
     # Deterministic policy for reproducible validation/test evaluation.
@@ -521,13 +768,46 @@ def evaluate_dqn_on_split(
     if (not initial) and previous_state is not None and len(previous_state) >= 3:
         initial_shares = float(previous_state[2])
 
-    aligned_len = min(len(action_dates), len(executed_shares), len(trade_prices))
+    account_values = (
+        pd.to_numeric(account_value_df["account_value"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+        .reset_index(drop=True)
+    )
+    action_account_values = account_values.iloc[1 : 1 + len(actions)].reset_index(drop=True)
+    previous_account_values = account_values.iloc[: len(actions)].reset_index(drop=True)
+
+    aligned_len = min(
+        len(action_dates),
+        len(executed_shares),
+        len(trade_prices),
+        len(action_account_values),
+        len(previous_account_values),
+    )
     action_dates = action_dates.iloc[:aligned_len].reset_index(drop=True)
     discrete_actions = actions[:aligned_len]
     continuous_actions = action_values[:aligned_len]
     executed_shares = executed_shares[:aligned_len]
     trade_prices = trade_prices.iloc[:aligned_len].reset_index(drop=True)
+    action_account_values = action_account_values.iloc[:aligned_len].reset_index(drop=True)
+    previous_account_values = previous_account_values.iloc[:aligned_len].reset_index(drop=True)
+
     position_after_trade = (np.cumsum(executed_shares) + initial_shares).tolist()
+    step_pnl = (
+        action_account_values.to_numpy(dtype=float)
+        - previous_account_values.to_numpy(dtype=float)
+    )
+    position_market_value = (
+        np.asarray(position_after_trade, dtype=float) * trade_prices.to_numpy(dtype=float)
+    )
+    account_value_arr = action_account_values.to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        weight = np.where(account_value_arr > 0.0, position_market_value / account_value_arr, 0.0)
+    weight = np.nan_to_num(weight, nan=0.0, posinf=0.0, neginf=0.0)
+    weight = np.clip(weight, 0.0, 1.0)
+    running_peak = np.maximum.accumulate(account_value_arr)
+    drawdown = running_peak - account_value_arr
+
     actions_df = pd.DataFrame(
         {
             "date": action_dates,
@@ -537,6 +817,9 @@ def evaluate_dqn_on_split(
             "trade_price": trade_prices,
             "trade_notional": np.abs(np.asarray(executed_shares)) * trade_prices.to_numpy(),
             "position_after_trade": position_after_trade,
+            "weight": weight,
+            "pnl": step_pnl,
+            "drawdown": drawdown,
         }
     )
     terminal_state = list(getattr(base_env, "state", []))
@@ -806,13 +1089,12 @@ def run_walkforward_drl_training(
 ) -> pd.DataFrame:
     """
     End-to-end walk-forward loop:
-    1) split data by fold
-    2) train on train split
+    1) load fold CSVs + transformer latent npy files per fold
+    2) train DQN on the merged train split
     3) evaluate on val/test
     4) write fold artifacts and aggregate metrics
     """
 
-    full_df = load_data(path=config.input_path)
     folds = _resolve_folds(selected_folds=selected_folds, max_folds=max_folds)
 
     output_root = Path(config.output_dir)
@@ -824,29 +1106,36 @@ def run_walkforward_drl_training(
     stitched_test_curves: list[pd.DataFrame] = []
     stitched_test_actions: list[pd.DataFrame] = []
     stitched_previous_state: list[float] | None = None
+
+    # Accumulate test-split close prices across folds for buy-and-hold baseline.
+    test_price_frames: list[pd.DataFrame] = []
+
     for fold in folds:
+        fold_name = fold["name"]
+        fold_data_dir = Path(config.fold_root) / fold_name
+        latent_dir = Path(config.latent_root) / fold_name
+
         print(
-            f"Running {fold['name']}: "
+            f"Running {fold_name}: "
             f"train {fold['train_start']} to {fold['train_end']}, "
             f"val {fold['val_start']} to {fold['val_end']}, "
             f"test {fold['test_start']} to {fold['test_end']}"
         )
 
-        # Fold boundaries are sourced from configs/walkforward_folds.py.
-        train_raw, val_raw, test_raw = create_walk_forward_split(
-            full_df,
-            train_start=fold["train_start"],
-            train_end=fold["train_end"],
-            val_start=fold["val_start"],
-            val_end=fold["val_end"],
-            test_start=fold["test_start"],
-            test_end=fold["test_end"],
-        )
+        # Load fold CSVs and merge transformer latent vectors by date.
+        train_merged = _load_fold_split_with_latents(fold_data_dir, latent_dir, "train")
+        val_merged = _load_fold_split_with_latents(fold_data_dir, latent_dir, "val")
+        test_merged = _load_fold_split_with_latents(fold_data_dir, latent_dir, "test")
 
-        # Convert raw split data into FinRL schema and drop invalid feature rows.
-        train_finrl = prepare_finrl_dataframe(train_raw, ticker=config.ticker)
-        val_finrl = prepare_finrl_dataframe(val_raw, ticker=config.ticker)
-        test_finrl = prepare_finrl_dataframe(test_raw, ticker=config.ticker)
+        # Convert merged splits into FinRL schema.
+        train_finrl = prepare_finrl_dataframe(train_merged, ticker=config.ticker)
+        val_finrl = prepare_finrl_dataframe(val_merged, ticker=config.ticker)
+        test_finrl = prepare_finrl_dataframe(test_merged, ticker=config.ticker)
+
+        # Cache test close prices for the stitched buy-and-hold baseline.
+        test_price_frames.append(
+            test_finrl[["date", "close"]].assign(fold=fold_name)
+        )
 
         # Train one fresh model per fold (no leakage across folds).
         model, env_kwargs, stock_trading_env_cls, gym_module = train_fold_dqn(
@@ -868,6 +1157,8 @@ def run_walkforward_drl_training(
                 gym_module=gym_module,
                 action_grid=config.action_grid,
                 initial_amount=config.initial_amount,
+                downside_penalty_alpha=config.downside_penalty_alpha,
+                trade_penalty_beta=config.trade_penalty_beta,
             )
             metrics = compute_performance_metrics(account_df, actions_df=actions_df)
 
@@ -902,6 +1193,8 @@ def run_walkforward_drl_training(
             gym_module=gym_module,
             action_grid=config.action_grid,
             initial_amount=config.initial_amount,
+            downside_penalty_alpha=config.downside_penalty_alpha,
+            trade_penalty_beta=config.trade_penalty_beta,
             initial=stitched_previous_state is None,
             previous_state=stitched_previous_state,
         )
@@ -922,6 +1215,9 @@ def run_walkforward_drl_training(
                     "trade_price",
                     "trade_notional",
                     "position_after_trade",
+                    "weight",
+                    "pnl",
+                    "drawdown",
                     "fold",
                 ]
             ]
@@ -951,8 +1247,24 @@ def run_walkforward_drl_training(
         stitched_actions_df = pd.concat(stitched_test_actions, ignore_index=True)
         stitched_actions_df.to_csv(output_root / "rl_only_stitched_test_actions.csv", index=False)
 
+        # Reconstruct a close-price series from the test splits for baselines.
+        if test_price_frames:
+            all_test_prices = (
+                pd.concat(test_price_frames, ignore_index=True)
+                .assign(date=lambda df: pd.to_datetime(df["date"], errors="coerce"))
+                .dropna(subset=["date", "close"])
+                .drop_duplicates(subset=["date"], keep="last")
+                .sort_values("date")
+                .set_index("date")["close"]
+                .rename("Close")
+            )
+            price_df_for_baseline = all_test_prices.to_frame().rename_axis("Date").reset_index()
+            price_df_for_baseline = price_df_for_baseline.set_index("Date")
+        else:
+            price_df_for_baseline = pd.DataFrame(columns=["Close"])
+
         classic_df = build_stitched_classic_baselines(
-            full_df=full_df,
+            full_df=price_df_for_baseline,
             stitched_dates=stitched_rl_df["date"],
             initial_amount=config.initial_amount,
             momentum_lookback=126,
@@ -999,20 +1311,29 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Train and evaluate an RL-only DQN baseline in FinRL across "
-            "walk-forward folds using SPY OHLCV + technical indicators."
+            "Train and evaluate a market-state-aware DQN agent in FinRL across "
+            "walk-forward folds using SPY fold CSVs + transformer latent vectors."
         )
     )
     parser.add_argument(
-        "--input-path",
+        "--fold-root",
         type=str,
-        default="data/spy_market_data.csv",
-        help="Path to SPY market data CSV with engineered indicators.",
+        default="data/training",
+        help="Directory containing fold subdirs (fold1/, fold2/, ...) with labeled CSVs.",
+    )
+    parser.add_argument(
+        "--latent-root",
+        type=str,
+        default="data/transformer_npy/gating",
+        help=(
+            "Directory containing per-fold transformer latent .npy files "
+            "(e.g. data/transformer_npy/gating/fold1/latents_train.npy)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="data/baselines/rl_only",
+        default="data/drl_results",
         help="Directory to store fold outputs and summary metrics.",
     )
     parser.add_argument(
@@ -1024,7 +1345,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train-timesteps",
         type=int,
-        default=50_000,
+        default=200_000,
         help="DQN training timesteps per fold.",
     )
     parser.add_argument(
@@ -1042,7 +1363,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reward-scaling",
         type=float,
-        default=1e-4,
+        default=1e-3,
         help="Reward scaling factor passed to FinRL StockTradingEnv.",
     )
     parser.add_argument(
@@ -1078,6 +1399,24 @@ def parse_args() -> argparse.Namespace:
             "continuous actions (must include 0)."
         ),
     )
+    parser.add_argument(
+        "--downside-penalty-alpha",
+        type=float,
+        default=1.0,
+        help=(
+            "Alpha in shaped reward: R_t - alpha * max(0, -R_t)^2. "
+            "Set to 0 to disable downside penalty and use raw step return."
+        ),
+    )
+    parser.add_argument(
+        "--trade-penalty-beta",
+        type=float,
+        default=1e-3,
+        help=(
+            "Beta penalty subtracted from reward whenever a trade is executed. "
+            "Set to 0 to disable trade penalty."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1087,7 +1426,8 @@ def main() -> None:
     args = parse_args()
 
     config = DRLTrainingConfig(
-        input_path=args.input_path,
+        fold_root=args.fold_root,
+        latent_root=args.latent_root,
         output_dir=args.output_dir,
         ticker=args.ticker,
         train_timesteps=args.train_timesteps,
@@ -1096,6 +1436,8 @@ def main() -> None:
         reward_scaling=args.reward_scaling,
         hmax=args.hmax,
         seed=args.seed,
+        downside_penalty_alpha=args.downside_penalty_alpha,
+        trade_penalty_beta=args.trade_penalty_beta,
         action_grid=_parse_action_grid(args.action_grid),
         dqn=DQNConfig(),
     )

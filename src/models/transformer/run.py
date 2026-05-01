@@ -136,16 +136,13 @@ def _build_transformer_config(args: argparse.Namespace) -> TransformerConfig:
         gate_beta=args.gate_beta,
         gate_mode=gate_mode,
         readout_mode=readout_mode,
-        use_pre_tanh_z=args.use_pre_tanh_z,
         n_dir_classes=args.n_dir_classes,
         n_reg_classes=args.n_reg_classes,
         lambda_dir=args.lambda_dir,
         lambda_reg=args.lambda_reg,
-        lambda_ret=args.lambda_ret,
         dir_label_smoothing=args.dir_label_smoothing,
-        dir_q_low=args.dir_q_low,
-        dir_q_high=args.dir_q_high,
         dir_head_hidden=args.dir_head_hidden,
+        use_task_specific_heads=args.use_task_specific_heads,
     )
 
 
@@ -181,7 +178,7 @@ def _run_epoch(
     d_feat: int,
     optimizer: torch.optim.Optimizer | None = None,
     max_batches: int | None = None,
-    dir_class_weights: torch.Tensor | None = None,
+    grad_clip: float = 1.0,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -190,13 +187,12 @@ def _run_epoch(
         "total_loss": 0.0,
         "dir_loss": 0.0,
         "reg_loss": 0.0,
-        "ret_loss": 0.0,
         "dir_correct": 0.0,
         "reg_correct": 0.0,
         "num_samples": 0,
     }
 
-    for batch_idx, (x, y_dir, y_reg, y_ret) in enumerate(dataloader):
+    for batch_idx, (x, y_dir, y_reg) in enumerate(dataloader):
         if max_batches is not None and batch_idx >= max_batches:
             break
 
@@ -206,22 +202,10 @@ def _run_epoch(
             raise ValueError(
                 f"Non-finite values detected in input batch at index {batch_idx}."
             )
-        y_ret_f32 = y_ret.to(dtype=torch.float32)
-        if not torch.isfinite(y_ret_f32).all():
-            n_bad = int((~torch.isfinite(y_ret_f32)).sum())
-            print(
-                f"[Warning] {n_bad} non-finite return target(s) in batch {batch_idx}; "
-                "clamping to 0.",
-                flush=True,
-            )
-            y_ret_f32 = torch.nan_to_num(y_ret_f32, nan=0.0, posinf=0.0, neginf=0.0)
         targets: dict[str, Any] = {
             "y_dir": y_dir.to(device=device, dtype=torch.long, non_blocking=True),
             "y_reg": y_reg.to(device=device, dtype=torch.long, non_blocking=True),
-            "y_ret_std": y_ret_f32.to(device=device, non_blocking=True),
         }
-        if dir_class_weights is not None:
-            targets["dir_weights"] = dir_class_weights
 
         if is_train:
             optimizer.zero_grad(set_to_none=True)
@@ -235,6 +219,8 @@ def _run_epoch(
                 )
             if is_train:
                 loss.backward()
+                if grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
         batch_size = int(x.shape[0])
@@ -242,7 +228,6 @@ def _run_epoch(
         totals["total_loss"] += info["total_loss"] * batch_size
         totals["dir_loss"] += info["dir_loss"] * batch_size
         totals["reg_loss"] += info["reg_loss"] * batch_size
-        totals["ret_loss"] += info["ret_loss"] * batch_size
         totals["dir_correct"] += (
             (out["dir_logits"].argmax(dim=1) == targets["y_dir"]).sum().item()
         )
@@ -258,11 +243,95 @@ def _run_epoch(
         "total_loss": totals["total_loss"] / n,
         "dir_loss": totals["dir_loss"] / n,
         "reg_loss": totals["reg_loss"] / n,
-        "ret_loss": totals["ret_loss"] / n,
         "dir_acc": totals["dir_correct"] / n,
         "reg_acc": totals["reg_correct"] / n,
         "num_samples": float(totals["num_samples"]),
     }
+
+
+def _collect_split_predictions(
+    model: MarketTransformer,
+    dataloader: DataLoader,
+    device: torch.device,
+    variant: str,
+    d_feat: int,
+) -> dict[str, np.ndarray]:
+    """
+    Collect per-sample predictions/targets for a split in dataloader order.
+
+    Returns:
+        dict with y_dir_true, y_dir_pred, y_reg_true, y_reg_pred.
+    """
+    model.eval()
+    y_dir_true: list[np.ndarray] = []
+    y_dir_pred: list[np.ndarray] = []
+    y_reg_true: list[np.ndarray] = []
+    y_reg_pred: list[np.ndarray] = []
+
+    with torch.no_grad():
+        for x, y_dir, y_reg in dataloader:
+            x = x.to(device, non_blocking=True)
+            x = _apply_variant_to_inputs(x, variant=variant, d_feat=d_feat)
+            out = model(x)
+
+            y_dir_true.append(y_dir.cpu().numpy().astype(np.int64))
+            y_dir_pred.append(out["dir_logits"].argmax(dim=1).cpu().numpy().astype(np.int64))
+            y_reg_true.append(y_reg.cpu().numpy().astype(np.int64))
+            y_reg_pred.append(out["reg_logits"].argmax(dim=1).cpu().numpy().astype(np.int64))
+
+    def _concat_or_empty(parts: list[np.ndarray], dtype: np.dtype) -> np.ndarray:
+        if not parts:
+            return np.empty((0,), dtype=dtype)
+        return np.concatenate(parts, axis=0).astype(dtype)
+
+    return {
+        "y_dir_true": _concat_or_empty(y_dir_true, np.int64),
+        "y_dir_pred": _concat_or_empty(y_dir_pred, np.int64),
+        "y_reg_true": _concat_or_empty(y_reg_true, np.int64),
+        "y_reg_pred": _concat_or_empty(y_reg_pred, np.int64),
+    }
+
+
+def _export_test_predictions(
+    model: MarketTransformer,
+    test_loader: DataLoader,
+    fold_dir: Path,
+    output_dir: Path,
+    config: TransformerConfig,
+    variant: str,
+    device: torch.device,
+) -> int:
+    """
+    Save per-sample test targets and predictions for downstream diagnostics (e.g., MAE).
+    """
+    preds = _collect_split_predictions(
+        model=model,
+        dataloader=test_loader,
+        device=device,
+        variant=variant,
+        d_feat=config.d_feat,
+    )
+    n_samples = int(preds["y_dir_true"].shape[0])
+
+    split_dates = _load_split_dates(fold_dir=fold_dir)
+    # Dataset labels are aligned to window end indices [W-1, ..., n_rows-2], so drop final row.
+    aligned_dates = split_dates["test"][config.window_size - 1 : -1].to_numpy(dtype="datetime64[ns]")
+    if aligned_dates.shape[0] != n_samples:
+        raise RuntimeError(
+            f"Prediction/date mismatch for test split: {n_samples} vs {aligned_dates.shape[0]}"
+        )
+
+    pred_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(aligned_dates),
+            "y_dir_true": preds["y_dir_true"],
+            "y_dir_pred": preds["y_dir_pred"],
+            "y_reg_true": preds["y_reg_true"],
+            "y_reg_pred": preds["y_reg_pred"],
+        }
+    )
+    pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
+    return n_samples
 
 
 def _save_checkpoint(
@@ -434,8 +503,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-train-batches must be >= 1 when provided.")
     if args.max_eval_batches is not None and args.max_eval_batches <= 0:
         raise ValueError("--max-eval-batches must be >= 1 when provided.")
-    if not (0.0 <= args.dir_q_low < args.dir_q_high <= 1.0):
-        raise ValueError("Direction quantiles must satisfy 0 <= q_low < q_high <= 1.")
     if args.variant == "no_gating" and args.gate_mode != GateMode.MASTER.value:
         print(
             "[Info] no_gating selected; overriding gate_mode to 'master' "
@@ -490,9 +557,10 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             fold_dir=str(fold_dir),
             window_size=config.window_size,
             batch_size=args.batch_size,
-            q_low=config.dir_q_low,
-            q_high=config.dir_q_high,
             num_workers=args.num_workers,
+            shuffle_train=args.shuffle_train,
+            n_dir_classes=config.n_dir_classes,
+            dir_n_forward=args.dir_n_forward,
         )
 
         feature_dim = int(train_loader.dataset.features.shape[1])
@@ -508,25 +576,35 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             model.configure_optimizers(lr=args.lr, weight_decay=args.weight_decay),
             lr=args.lr,
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs, eta_min=1e-6
-        )
-
-        # Compute per-class weights for the direction CE loss from training labels.
-        # Inverse-frequency weighting compensates for the 40/20/40 (or 33/33/33)
-        # imbalance; weights are normalised so their mean equals 1.0.
-        train_dir_labels = torch.from_numpy(
-            train_loader.dataset.dir_labels.astype("int64")
-        )
-        dir_counts = torch.bincount(train_dir_labels, minlength=config.n_dir_classes).float()
-        dir_class_weights = (1.0 / dir_counts.clamp(min=1.0))
-        dir_class_weights = (dir_class_weights / dir_class_weights.mean()).to(device)
+        warmup_epochs = max(1, int(args.epochs * args.warmup_frac)) if args.warmup_frac > 0 else 0
+        if warmup_epochs > 0:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+            )
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, args.epochs - warmup_epochs), eta_min=1e-6
+            )
+            scheduler: torch.optim.lr_scheduler.LRScheduler = (
+                torch.optim.lr_scheduler.SequentialLR(
+                    optimizer,
+                    schedulers=[warmup_scheduler, cosine_scheduler],
+                    milestones=[warmup_epochs],
+                )
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs, eta_min=1e-6
+            )
 
         fold_output = output_root / fold_name
         fold_output.mkdir(parents=True, exist_ok=True)
         best_ckpt_path = fold_output / "best_model.pt"
 
-        best_val_loss = float("inf")
+        # Early stopping tracks the sum of direction + regime validation losses.
+        # With the return head removed, this is equivalent to tracking the two
+        # supervised objectives used by the current model.
+        best_val_primary_loss = float("inf")  # dir_loss + reg_loss only
+        best_val_loss = float("inf")           # total (for reporting in fold_summary.json)
         best_epoch = -1
         epoch_rows: list[dict[str, float | int]] = []
 
@@ -539,7 +617,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 d_feat=config.d_feat,
                 optimizer=optimizer,
                 max_batches=args.max_train_batches,
-                dir_class_weights=dir_class_weights,
+                grad_clip=args.grad_clip,
             )
             val_metrics = _run_epoch(
                 model=model,
@@ -557,11 +635,10 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                 f"Epoch {epoch:03d} | "
                 f"train={train_metrics['total_loss']:.4f} "
                 f"(dir={train_metrics['dir_loss']:.4f} acc={train_metrics['dir_acc']:.3f} "
-                f"reg={train_metrics['reg_loss']:.4f} acc={train_metrics['reg_acc']:.3f} "
-                f"ret={train_metrics['ret_loss']:.4f}) | "
+                f"reg={train_metrics['reg_loss']:.4f} acc={train_metrics['reg_acc']:.3f}) | "
                 f"val={val_metrics['total_loss']:.4f} "
                 f"(dir={val_metrics['dir_loss']:.4f} acc={val_metrics['dir_acc']:.3f} "
-                f"reg={val_metrics['reg_loss']:.4f}) "
+                f"reg={val_metrics['reg_loss']:.4f} acc={val_metrics['reg_acc']:.3f}) "
                 f"lr={scheduler.get_last_lr()[0]:.2e}",
                 flush=True,
             )
@@ -572,21 +649,21 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
                     "train_total_loss": float(train_metrics["total_loss"]),
                     "train_dir_loss": float(train_metrics["dir_loss"]),
                     "train_reg_loss": float(train_metrics["reg_loss"]),
-                    "train_ret_loss": float(train_metrics["ret_loss"]),
                     "train_dir_acc": float(train_metrics["dir_acc"]),
                     "train_reg_acc": float(train_metrics["reg_acc"]),
                     "train_num_samples": int(train_metrics["num_samples"]),
                     "val_total_loss": float(val_metrics["total_loss"]),
                     "val_dir_loss": float(val_metrics["dir_loss"]),
                     "val_reg_loss": float(val_metrics["reg_loss"]),
-                    "val_ret_loss": float(val_metrics["ret_loss"]),
                     "val_dir_acc": float(val_metrics["dir_acc"]),
                     "val_reg_acc": float(val_metrics["reg_acc"]),
                     "val_num_samples": int(val_metrics["num_samples"]),
                 }
             )
 
-            if val_metrics["total_loss"] < best_val_loss:
+            val_primary_loss = val_metrics["dir_loss"] + val_metrics["reg_loss"]
+            if val_primary_loss < best_val_primary_loss:
+                best_val_primary_loss = val_primary_loss
                 best_val_loss = float(val_metrics["total_loss"])
                 best_epoch = epoch
                 _save_checkpoint(
@@ -640,6 +717,15 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             optimizer=None,
             max_batches=args.max_eval_batches,
         )
+        test_pred_rows = _export_test_predictions(
+            model=model,
+            test_loader=test_loader,
+            fold_dir=fold_dir,
+            output_dir=fold_output,
+            config=config,
+            variant=args.variant,
+            device=device,
+        )
 
         latent_counts = _export_fold_latents(
             model=model,
@@ -663,10 +749,10 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             "test_total_loss": float(test_metrics["total_loss"]),
             "test_dir_loss": float(test_metrics["dir_loss"]),
             "test_reg_loss": float(test_metrics["reg_loss"]),
-            "test_ret_loss": float(test_metrics["ret_loss"]),
             "test_dir_acc": float(test_metrics["dir_acc"]),
             "test_reg_acc": float(test_metrics["reg_acc"]),
             "test_num_samples": int(test_metrics["num_samples"]),
+            "test_pred_rows": int(test_pred_rows),
             **latent_counts,
         }
 
@@ -719,10 +805,10 @@ def parse_args(
 
     # Training
     parser.add_argument("--variant", choices=VARIANT_CHOICES, default=default_variant)
-    parser.add_argument("--epochs", type=int, default=20, help="Training epochs per fold.")
+    parser.add_argument("--epochs", type=int, default=100, help="Training epochs per fold.")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
-    parser.add_argument("--lr", type=float, default=3e-4, help="AdamW learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="AdamW learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
@@ -752,14 +838,15 @@ def parse_args(
 
     # Model / labels
     parser.add_argument("--window-size", type=int, default=20)
-    parser.add_argument("--d-feat", type=int, default=7)
+    parser.add_argument("--d-feat", type=int, default=16,
+                        help="Price/tech feature channels (10 scaled + 1 RSI + 1 BB + 4 regime_prob).")
     parser.add_argument("--d-sent", type=int, default=3)
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--d-ff", type=int, default=128)
     parser.add_argument("--d-z", type=int, default=16)
-    parser.add_argument("--n-layers", type=int, default=2)
+    parser.add_argument("--n-layers", type=int, default=3)
     parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--gate-beta", type=float, default=1.0)
     parser.add_argument(
         "--gate-mode",
@@ -769,26 +856,58 @@ def parse_args(
     parser.add_argument(
         "--readout-mode",
         choices=[mode.value for mode in ReadoutMode],
-        default=ReadoutMode.LAST.value,
+        default=ReadoutMode.ATTN_POOL.value,
     )
-    parser.add_argument(
-        "--use-pre-tanh-z",
-        action="store_true",
-        help="Set TransformerConfig.use_pre_tanh_z=True.",
-    )
-    parser.add_argument("--n-dir-classes", type=int, default=3)
+    parser.add_argument("--n-dir-classes", type=int, default=2,
+                        help="Direction head output classes: 2=binary Up/Down (default), "
+                             "3=Bear/Neutral/Bull.")
     parser.add_argument("--n-reg-classes", type=int, default=4)
-    parser.add_argument("--lambda-dir", type=float, default=0.5)
-    parser.add_argument("--lambda-reg", type=float, default=1.0)
-    parser.add_argument("--lambda-ret", type=float, default=0.3)
+    parser.add_argument("--lambda-dir", type=float, default=2.0)
+    parser.add_argument("--lambda-reg", type=float, default=0.3)
     parser.add_argument("--dir-label-smoothing", type=float, default=0.0)
-    parser.add_argument("--dir-q-low", type=float, default=0.33)
-    parser.add_argument("--dir-q-high", type=float, default=0.67)
     parser.add_argument(
         "--dir-head-hidden",
         type=int,
         default=32,
         help="Hidden dim for two-layer direction MLP head; 0 = single linear.",
+    )
+    parser.add_argument(
+        "--dir-n-forward",
+        type=int,
+        default=5,
+        help="Direction label horizon in trading days (default 5). "
+             "5-day forward returns have stronger momentum signal than 1-day.",
+    )
+    parser.add_argument(
+        "--use-task-specific-heads",
+        action="store_true",
+        default=True,
+        help="Direction head reads from h_pooled (bypasses the 64→16 bottleneck projection).",
+    )
+    parser.add_argument(
+        "--no-task-specific-heads",
+        dest="use_task_specific_heads",
+        action="store_false",
+        help="Revert direction head to read from z (16-dim bottleneck); ablation only.",
+    )
+    parser.add_argument(
+        "--no-shuffle-train",
+        dest="shuffle_train",
+        action="store_false",
+        help="Disable shuffling of training windows (default: shuffled).",
+    )
+    parser.set_defaults(shuffle_train=True)
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Max gradient norm for clip_grad_norm_ (0 = disabled).",
+    )
+    parser.add_argument(
+        "--warmup-frac",
+        type=float,
+        default=0.05,
+        help="Fraction of total epochs used for linear LR warm-up (0 = no warmup).",
     )
 
     return parser.parse_args(argv)

@@ -4,7 +4,7 @@ import pytest
 import torch
 from src.models.transformer.gate import SentimentGate, CrossAttentionGate
 
-B, W, D_FEAT, D_SENT, D_MODEL, N_HEADS = 4, 20, 7, 3, 128, 4
+B, W, D_FEAT, D_SENT, D_MODEL, N_HEADS = 4, 20, 16, 3, 64, 4
 
 
 # ── SentimentGate ─────────────────────────────────────────────────────────────
