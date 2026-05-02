@@ -252,6 +252,20 @@ def _train_one_model(
     DQN, torch = _load_tdqn_dependencies()
     from stable_baselines3.common.callbacks import BaseCallback
 
+    print(
+        f"[torch check] version={torch.__version__}, "
+        f"torch.version.cuda={torch.version.cuda}, "
+        f"cuda_available={torch.cuda.is_available()}, "
+        f"device_count={torch.cuda.device_count()}",
+        flush=True,
+    )
+    if torch.cuda.is_available():
+        print(
+            f"[torch check] current_device={torch.cuda.current_device()}, "
+            f"device_name={torch.cuda.get_device_name(torch.cuda.current_device())}",
+            flush=True,
+        )
+
     env = AugmentedTradingEnv(
         base_df=train_df,
         augmentation_config=config,
@@ -312,14 +326,25 @@ def _train_one_model(
             activation_fn=torch.nn.ReLU,
         ),
         seed=seed,
-        verbose=0,
-        device="cuda",
+        verbose=1,
     )
+
+    print(f"[SB3 check] model.device = {model.device}", flush=True)
+    print(
+        f"[SB3 check] policy parameter device = {next(model.policy.parameters()).device}",
+        flush=True,
+    )
+    print(
+        f"[SB3 check] q_net parameter device = {next(model.q_net.parameters()).device}",
+        flush=True,
+    )
+
     model.learn(
         total_timesteps=config.train_timesteps,
         progress_bar=False,
         callback=_CounterfactualCallback(),
     )
+
     return model
 
 
