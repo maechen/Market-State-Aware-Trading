@@ -1,0 +1,25 @@
+{
+  "selected_variant": "no_sentiment",
+  "selection_rule": "highest average stitched RL Sharpe ratio, then total return, then max drawdown",
+  "runs_used": [
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_42",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_52",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_63",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_69",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_81"
+  ],
+  "selected_metrics": {
+    "variant": "no_sentiment",
+    "strategy": "transformer_tdqn_stitched",
+    "total_return": 0.09496813521518233,
+    "annualized_return": 0.013373214428237246,
+    "annualized_volatility": 0.15433100437714714,
+    "sharpe_ratio": 0.08665280500317608,
+    "sortino_ratio": 0.09984592226414862,
+    "calmar_ratio": 0.033592116054258776,
+    "max_drawdown": -0.39810574620058214,
+    "turnover": 228.0328139750237,
+    "annualized_turnover": 33.39004597426263,
+    "average_holding_time_days": 19.723684210526315
+  }
+}

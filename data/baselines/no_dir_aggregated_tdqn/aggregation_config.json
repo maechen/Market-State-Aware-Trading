@@ -1,0 +1,14 @@
+{
+  "run_dirs": [
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_42",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_52",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_63",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_69",
+    "C:\\Users\\XMhua\\Documents\\Market-State-Aware-Trading\\data\\baselines\\drl_latent_regime_no_dir_81"
+  ],
+  "variants": [
+    "gating",
+    "no_gating",
+    "no_sentiment"
+  ]
+}
