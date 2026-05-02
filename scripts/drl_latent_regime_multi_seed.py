@@ -41,11 +41,38 @@ from drl_latent_regime_training import (  # noqa: E402
 
 
 VARIANTS = ("gating", "no_gating", "no_sentiment")
-KEY_COLUMNS = {
-    "rl_only_fold_metrics.csv": ["fold", "split"],
-    "rl_only_per_fold_test_metrics.csv": ["fold", "strategy"],
-    "rl_only_stitched_comparison_metrics.csv": ["strategy"],
+LEGACY_ARTIFACT_PREFIX = "rl_only"
+ARTIFACT_PREFIX = "drl_latent_regime"
+LEGACY_MODEL_STRATEGY = "rl_tdqn"
+LEGACY_STITCHED_MODEL_STRATEGY = "rl_tdqn_stitched"
+MODEL_STRATEGY = "transformer_tdqn"
+STITCHED_MODEL_STRATEGY = "transformer_tdqn_stitched"
+STRATEGY_LABELS = {
+    MODEL_STRATEGY: "Transformer-TDQN",
+    STITCHED_MODEL_STRATEGY: "Transformer-TDQN (stitched)",
+    "buy_hold": "Buy & Hold",
+    "momentum_126": "Momentum (126d)",
 }
+KEY_COLUMNS = {
+    f"{ARTIFACT_PREFIX}_fold_metrics.csv": ["fold", "split"],
+    f"{ARTIFACT_PREFIX}_per_fold_test_metrics.csv": ["fold", "strategy"],
+    f"{ARTIFACT_PREFIX}_stitched_comparison_metrics.csv": ["strategy"],
+}
+
+
+def _legacy_artifact_name(filename: str) -> str:
+    if filename.startswith(f"{ARTIFACT_PREFIX}_"):
+        return f"{LEGACY_ARTIFACT_PREFIX}_{filename[len(ARTIFACT_PREFIX) + 1:]}"
+    return filename
+
+
+def _rename_legacy_run_outputs(run_dir: Path) -> None:
+    for source_path in run_dir.glob(f"{LEGACY_ARTIFACT_PREFIX}_*"):
+        target_name = f"{ARTIFACT_PREFIX}_{source_path.name[len(LEGACY_ARTIFACT_PREFIX) + 1:]}"
+        target_path = source_path.with_name(target_name)
+        if target_path.exists():
+            continue
+        source_path.rename(target_path)
 
 
 def _write_per_variant_average(summary_dir: Path, filename: str, df: pd.DataFrame) -> None:
@@ -55,6 +82,13 @@ def _write_per_variant_average(summary_dir: Path, filename: str, df: pd.DataFram
         variant_dir = summary_dir / str(variant)
         variant_dir.mkdir(parents=True, exist_ok=True)
         variant_df.drop(columns=["variant"]).to_csv(variant_dir / filename, index=False)
+
+
+def _with_display_strategy_names(df: pd.DataFrame) -> pd.DataFrame:
+    plot_df = df.copy()
+    if "strategy" in plot_df.columns:
+        plot_df["strategy"] = plot_df["strategy"].replace(STRATEGY_LABELS)
+    return plot_df
 
 
 def _parse_seeds(seed_text: str | None, repetitions: int) -> list[int]:
@@ -103,9 +137,20 @@ def _banner(message: str) -> None:
 def _read_variant_csv(run_output_dir: Path, seed: int, variant: str, filename: str) -> pd.DataFrame | None:
     path = run_output_dir / f"seed_{seed}" / variant / filename
     if not path.exists():
+        legacy_path = path.with_name(_legacy_artifact_name(filename))
+        if legacy_path.exists():
+            path = legacy_path
+    if not path.exists():
         print(f"[WARN] Missing artifact, skipping: {path}", flush=True)
         return None
     df = pd.read_csv(path)
+    if "strategy" in df.columns:
+        df["strategy"] = df["strategy"].replace(
+            {
+                LEGACY_MODEL_STRATEGY: MODEL_STRATEGY,
+                LEGACY_STITCHED_MODEL_STRATEGY: STITCHED_MODEL_STRATEGY,
+            }
+        )
     df["seed"] = seed
     df["variant"] = variant
     return df
@@ -258,7 +303,7 @@ def _aggregate_actions(
 
 
 def _save_average_plots(summary_dir: Path) -> None:
-    curves_path = summary_dir / "average_rl_only_portfolio_curves.csv"
+    curves_path = summary_dir / f"average_{ARTIFACT_PREFIX}_portfolio_curves.csv"
     if curves_path.exists():
         curves_df = pd.read_csv(curves_path, parse_dates=["date"])
         for variant, variant_df in curves_df.groupby("variant"):
@@ -267,28 +312,32 @@ def _save_average_plots(summary_dir: Path) -> None:
                 output_path=summary_dir / f"{variant}_average_portfolio_growth.png",
             )
 
-    comparison_path = summary_dir / "average_rl_only_stitched_comparison.csv"
+    comparison_path = summary_dir / f"average_{ARTIFACT_PREFIX}_stitched_comparison.csv"
     if comparison_path.exists():
         comparison_df = pd.read_csv(comparison_path, parse_dates=["date"])
         for variant, variant_df in comparison_df.groupby("variant"):
             save_strategy_comparison_plot(
-                comparison_df=variant_df[["date", "strategy", "account_value"]],
+                comparison_df=_with_display_strategy_names(
+                    variant_df[["date", "strategy", "account_value"]]
+                ),
                 output_path=summary_dir / f"{variant}_average_stitched_comparison.png",
             )
 
-    per_fold_path = summary_dir / "average_rl_only_per_fold_test_comparison.csv"
+    per_fold_path = summary_dir / f"average_{ARTIFACT_PREFIX}_per_fold_test_comparison.csv"
     if per_fold_path.exists():
         per_fold_df = pd.read_csv(per_fold_path, parse_dates=["date"])
         for variant, variant_df in per_fold_df.groupby("variant"):
             save_per_fold_comparison_plot(
-                per_fold_comparison_df=variant_df[["date", "strategy", "account_value", "fold"]],
+                per_fold_comparison_df=_with_display_strategy_names(
+                    variant_df[["date", "strategy", "account_value", "fold"]]
+                ),
                 output_path=summary_dir / f"{variant}_average_per_fold_test_comparison.png",
             )
 
 
 def _write_average_decision_summary(summary_dir: Path, seeds: list[int]) -> pd.DataFrame | None:
-    comparison_path = summary_dir / "average_rl_only_stitched_comparison.csv"
-    actions_path = summary_dir / "ensemble_rl_only_stitched_test_actions.csv"
+    comparison_path = summary_dir / f"average_{ARTIFACT_PREFIX}_stitched_comparison.csv"
+    actions_path = summary_dir / f"ensemble_{ARTIFACT_PREFIX}_stitched_test_actions.csv"
     if not comparison_path.exists():
         return None
 
@@ -296,7 +345,7 @@ def _write_average_decision_summary(summary_dir: Path, seeds: list[int]) -> pd.D
     rows: list[dict] = []
     for (variant, strategy), strategy_df in comparison_df.groupby(["variant", "strategy"]):
         actions_df = None
-        if actions_path.exists() and strategy == "rl_tdqn_stitched":
+        if actions_path.exists() and strategy == STITCHED_MODEL_STRATEGY:
             actions_all = pd.read_csv(actions_path, parse_dates=["date"])
             actions_df = actions_all[actions_all["variant"] == variant].rename(
                 columns={
@@ -319,7 +368,7 @@ def _write_average_decision_summary(summary_dir: Path, seeds: list[int]) -> pd.D
     metrics_df.to_csv(summary_dir / output_name, index=False)
     _write_per_variant_average(summary_dir, output_name, metrics_df)
 
-    rl_df = metrics_df[metrics_df["strategy"] == "rl_tdqn_stitched"].copy()
+    rl_df = metrics_df[metrics_df["strategy"] == STITCHED_MODEL_STRATEGY].copy()
     if rl_df.empty:
         return metrics_df
     rl_df = rl_df.sort_values(
@@ -357,7 +406,7 @@ def aggregate_outputs(
         summary_dir,
         seeds,
         variants,
-        "rl_only_portfolio_curves.csv",
+        f"{ARTIFACT_PREFIX}_portfolio_curves.csv",
         ["date", "fold", "split"],
     )
     _average_curve_file(
@@ -365,7 +414,7 @@ def aggregate_outputs(
         summary_dir,
         seeds,
         variants,
-        "rl_only_stitched_test_equity.csv",
+        f"{ARTIFACT_PREFIX}_stitched_test_equity.csv",
         ["date", "fold"],
     )
     _average_curve_file(
@@ -373,7 +422,7 @@ def aggregate_outputs(
         summary_dir,
         seeds,
         variants,
-        "rl_only_stitched_comparison.csv",
+        f"{ARTIFACT_PREFIX}_stitched_comparison.csv",
         ["date", "strategy"],
     )
     _average_curve_file(
@@ -381,7 +430,7 @@ def aggregate_outputs(
         summary_dir,
         seeds,
         variants,
-        "rl_only_per_fold_test_comparison.csv",
+        f"{ARTIFACT_PREFIX}_per_fold_test_comparison.csv",
         ["date", "fold", "strategy"],
     )
 
@@ -390,7 +439,7 @@ def aggregate_outputs(
         summary_dir,
         seeds,
         variants,
-        "rl_only_stitched_test_actions.csv",
+        f"{ARTIFACT_PREFIX}_stitched_test_actions.csv",
         ["date", "fold"],
     )
 
@@ -523,6 +572,7 @@ def main() -> None:
                     selected_folds=args.folds,
                     max_folds=args.max_folds,
                 )
+                _rename_legacy_run_outputs(run_output_dir / f"seed_{seed}" / variant)
                 print(
                     f"Completed {variant} seed {seed} in {_elapsed(run_start)}. "
                     f"Fold metric rows: {len(metrics_df)}",

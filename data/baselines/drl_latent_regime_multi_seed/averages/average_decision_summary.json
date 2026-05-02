@@ -1,0 +1,25 @@
+{
+  "selected_variant": "no_gating",
+  "selection_rule": "highest average stitched RL Sharpe ratio, then total return, then max drawdown",
+  "seeds_used": [
+    1836178384,
+    5629345,
+    629425236,
+    1637688973,
+    1837439542
+  ],
+  "selected_metrics": {
+    "variant": "no_gating",
+    "strategy": "transformer_tdqn_stitched",
+    "total_return": -0.03384261795784316,
+    "annualized_return": -0.005028564220433074,
+    "annualized_volatility": 0.14349938278728833,
+    "sharpe_ratio": -0.03504241009793752,
+    "sortino_ratio": -0.04108726705353606,
+    "calmar_ratio": -0.014194170064600413,
+    "max_drawdown": -0.3542696894251024,
+    "turnover": 211.3596749402105,
+    "annualized_turnover": 30.948656644353893,
+    "average_holding_time_days": 14.691489361702128
+  }
+}
