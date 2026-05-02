@@ -313,6 +313,7 @@ def _train_one_model(
         ),
         seed=seed,
         verbose=0,
+        device="cuda",
     )
     model.learn(
         total_timesteps=config.train_timesteps,
