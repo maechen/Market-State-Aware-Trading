@@ -86,6 +86,16 @@ ENV_FEATURE_COLUMNS = [
     "ma_50",
 ]
 BASE_ENV_FEATURE_COLUMNS = list(ENV_FEATURE_COLUMNS)
+ARTIFACT_PREFIX = "drl_transformer"
+MODEL_STRATEGY = "transformer_tdqn"
+STITCHED_MODEL_STRATEGY = "transformer_tdqn_stitched"
+MODEL_LABEL = "Transformer-TDQN"
+STRATEGY_LABELS = {
+    MODEL_STRATEGY: MODEL_LABEL,
+    STITCHED_MODEL_STRATEGY: f"{MODEL_LABEL} (stitched)",
+    "buy_hold": "Buy & Hold",
+    "momentum_126": "Momentum (126d)",
+}
 
 # Detect gym at module level so SingleAssetTradingEnv can inherit the right base.
 try:
@@ -913,7 +923,7 @@ def save_portfolio_growth_plot(portfolio_curves_df: pd.DataFrame, output_path: P
             label=f"{fold_name} {split_name.upper()}",
         )
 
-    ax.set_title("SPY Portfolio Growth (RL-Only TDQN)")
+    ax.set_title("SPY Portfolio Growth (Transformer-Latent TDQN)")
     ax.set_xlabel("Date")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend(loc="best", fontsize=8)
@@ -997,7 +1007,12 @@ def save_strategy_comparison_plot(comparison_df: pd.DataFrame, output_path: Path
 
     fig, ax = plt.subplots(figsize=(12, 6))
     for strategy_name, strategy_df in plot_df.groupby("strategy"):
-        ax.plot(strategy_df["date"], strategy_df["account_value"], linewidth=2.0, label=strategy_name)
+        ax.plot(
+            strategy_df["date"],
+            strategy_df["account_value"],
+            linewidth=2.0,
+            label=STRATEGY_LABELS.get(strategy_name, strategy_name),
+        )
 
     ax.set_title("Stitched Out-of-Sample Equity Curve Comparison")
     ax.set_xlabel("Date")
@@ -1011,7 +1026,7 @@ def save_strategy_comparison_plot(comparison_df: pd.DataFrame, output_path: Path
 
 def save_per_fold_comparison_plot(per_fold_comparison_df: pd.DataFrame, output_path: Path) -> None:
     """
-    Grid of subplots comparing RL-TDQN, Buy-and-Hold, and Momentum on each
+    Grid of subplots comparing Transformer-TDQN, Buy-and-Hold, and Momentum on each
     fold's test period — all three strategies start at the same initial capital
     on the same first test day.
     """
@@ -1035,7 +1050,7 @@ def save_per_fold_comparison_plot(per_fold_comparison_df: pd.DataFrame, output_p
     nrows = math.ceil(n_folds / ncols)
 
     strategy_styles: dict[str, dict] = {
-        "rl_tdqn": {"color": "tab:blue", "label": "RL-TDQN"},
+        MODEL_STRATEGY: {"color": "tab:blue", "label": MODEL_LABEL},
         "buy_hold": {"color": "tab:green", "label": "Buy & Hold"},
         "momentum_126": {"color": "tab:orange", "label": "Momentum (126d)"},
     }
@@ -1068,7 +1083,7 @@ def save_per_fold_comparison_plot(per_fold_comparison_df: pd.DataFrame, output_p
         axes[row][col].set_visible(False)
 
     fig.suptitle(
-        "Per-Fold Test Period: RL-TDQN vs Buy & Hold vs Momentum (each fold starts at $10k)",
+        "Per-Fold Test Period: Transformer-TDQN vs Buy & Hold vs Momentum (each fold starts at $10k)",
         fontsize=12,
     )
     fig.tight_layout()
@@ -1222,7 +1237,7 @@ def run_walkforward_rl_only_baseline(
                 momentum_lookback=126,
             )
             fold_rl_curve = fold_test_account_df[["date", "account_value"]].assign(
-                strategy="rl_tdqn"
+                strategy=MODEL_STRATEGY
             )
             fold_comparison = pd.concat([fold_rl_curve, fold_classic_df], ignore_index=True)
             fold_comparison["fold"] = fold["name"]
@@ -1270,15 +1285,15 @@ def run_walkforward_rl_only_baseline(
             .sort_values(["fold", "strategy", "date"])
             .reset_index(drop=True)
         )
-        per_fold_df.to_csv(output_root / "rl_only_per_fold_test_comparison.csv", index=False)
+        per_fold_df.to_csv(output_root / f"{ARTIFACT_PREFIX}_per_fold_test_comparison.csv", index=False)
         save_per_fold_comparison_plot(
             per_fold_comparison_df=per_fold_df,
-            output_path=output_root / "rl_only_per_fold_test_comparison.png",
+            output_path=output_root / f"{ARTIFACT_PREFIX}_per_fold_test_comparison.png",
         )
         per_fold_metrics_rows: list[dict] = []
         for (fold_name, strategy_name), strat_df in per_fold_df.groupby(["fold", "strategy"]):
             strat_actions_df = (
-                per_fold_test_actions.get(fold_name) if strategy_name == "rl_tdqn" else None
+                per_fold_test_actions.get(fold_name) if strategy_name == MODEL_STRATEGY else None
             )
             strat_metrics = compute_performance_metrics(
                 strat_df[["date", "account_value"]].sort_values("date").reset_index(drop=True),
@@ -1288,18 +1303,18 @@ def run_walkforward_rl_only_baseline(
                 {"fold": fold_name, "strategy": strategy_name, **strat_metrics}
             )
         pd.DataFrame(per_fold_metrics_rows).to_csv(
-            output_root / "rl_only_per_fold_test_metrics.csv", index=False
+            output_root / f"{ARTIFACT_PREFIX}_per_fold_test_metrics.csv", index=False
         )
 
     metrics_df = pd.DataFrame(metrics_rows)
-    metrics_df.to_csv(output_root / "rl_only_fold_metrics.csv", index=False)
+    metrics_df.to_csv(output_root / f"{ARTIFACT_PREFIX}_fold_metrics.csv", index=False)
 
     if portfolio_curves:
         curves_df = pd.concat(portfolio_curves, ignore_index=True)
-        curves_df.to_csv(output_root / "rl_only_portfolio_curves.csv", index=False)
+        curves_df.to_csv(output_root / f"{ARTIFACT_PREFIX}_portfolio_curves.csv", index=False)
         save_portfolio_growth_plot(
             portfolio_curves_df=curves_df,
-            output_path=output_root / "rl_only_portfolio_growth.png",
+            output_path=output_root / f"{ARTIFACT_PREFIX}_portfolio_growth.png",
         )
 
     if stitched_test_curves:
@@ -1311,11 +1326,11 @@ def run_walkforward_rl_only_baseline(
             .drop_duplicates(subset=["date"], keep="last")
             .reset_index(drop=True)
         )
-        stitched_rl_df.to_csv(output_root / "rl_only_stitched_test_equity.csv", index=False)
+        stitched_rl_df.to_csv(output_root / f"{ARTIFACT_PREFIX}_stitched_test_equity.csv", index=False)
 
         all_stitched_actions = pd.concat(stitched_test_actions, ignore_index=True)
         all_stitched_actions.to_csv(
-            output_root / "rl_only_stitched_test_actions.csv", index=False
+            output_root / f"{ARTIFACT_PREFIX}_stitched_test_actions.csv", index=False
         )
 
         classic_df = build_stitched_classic_baselines(
@@ -1325,7 +1340,7 @@ def run_walkforward_rl_only_baseline(
             momentum_lookback=126,
         )
         stitched_rl_long = stitched_rl_df[["date", "account_value"]].assign(
-            strategy="rl_tdqn_stitched"
+            strategy=STITCHED_MODEL_STRATEGY
         )
         comparison_df = pd.concat([stitched_rl_long, classic_df], ignore_index=True)
         comparison_df["date"] = pd.to_datetime(comparison_df["date"], errors="coerce")
@@ -1334,16 +1349,16 @@ def run_walkforward_rl_only_baseline(
             .sort_values(["date", "strategy"])
             .reset_index(drop=True)
         )
-        comparison_df.to_csv(output_root / "rl_only_stitched_comparison.csv", index=False)
+        comparison_df.to_csv(output_root / f"{ARTIFACT_PREFIX}_stitched_comparison.csv", index=False)
         save_strategy_comparison_plot(
             comparison_df=comparison_df,
-            output_path=output_root / "rl_only_stitched_comparison.png",
+            output_path=output_root / f"{ARTIFACT_PREFIX}_stitched_comparison.png",
         )
 
         stitched_metrics_rows: list[dict] = []
         for strategy_name, strategy_df in comparison_df.groupby("strategy"):
             strategy_actions_df = (
-                all_stitched_actions if strategy_name == "rl_tdqn_stitched" else None
+                all_stitched_actions if strategy_name == STITCHED_MODEL_STRATEGY else None
             )
             strategy_metrics = compute_performance_metrics(
                 strategy_df[["date", "account_value"]].sort_values("date").reset_index(drop=True),
@@ -1351,7 +1366,7 @@ def run_walkforward_rl_only_baseline(
             )
             stitched_metrics_rows.append({"strategy": strategy_name, **strategy_metrics})
         pd.DataFrame(stitched_metrics_rows).to_csv(
-            output_root / "rl_only_stitched_comparison_metrics.csv", index=False
+            output_root / f"{ARTIFACT_PREFIX}_stitched_comparison_metrics.csv", index=False
         )
 
     with open(output_root / "run_config.json", "w", encoding="utf-8") as fh:
@@ -1436,7 +1451,7 @@ def main() -> None:
         selected_folds=args.folds,
         max_folds=args.max_folds,
     )
-    print("TDQN baseline complete. Metrics:")
+    print("Transformer-TDQN baseline complete. Metrics:")
     print(metrics_df.to_string(index=False))
 
 
