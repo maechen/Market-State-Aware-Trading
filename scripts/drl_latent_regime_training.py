@@ -586,6 +586,9 @@ def train_fold_tdqn(
     DQN, torch = _load_tdqn_dependencies()
     from stable_baselines3.common.callbacks import BaseCallback
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
     norm_coeffs = compute_normalization_coeffs(train_df)
     prices = train_df["close"].to_numpy(dtype=np.float64)
     precomputed = precompute_training_rewards(prices, config.reward_window_k)
@@ -709,6 +712,7 @@ def train_fold_tdqn(
         policy_kwargs=policy_kwargs,
         seed=config.seed,
         verbose=0,
+        device=device,
     )
     model.learn(
         total_timesteps=config.train_timesteps,
