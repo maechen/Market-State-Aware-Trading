@@ -1246,9 +1246,9 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--input-path", type=str, default="data/spy_market_data.csv")
-    parser.add_argument("--output-dir", type=str, default="data/baselines/rl_only")
+    parser.add_argument("--output-dir", type=str, default="data/baselines/rl_only_baseline")
     parser.add_argument("--ticker", type=str, default="SPY")
-    parser.add_argument("--train-timesteps", type=int, default=200_000)
+    parser.add_argument("--train-timesteps", type=int, default=500_000)
     parser.add_argument("--initial-amount", type=float, default=10_000.0)
     parser.add_argument(
         "--transaction-cost-pct",
