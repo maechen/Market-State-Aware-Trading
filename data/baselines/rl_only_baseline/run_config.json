@@ -2,7 +2,7 @@
   "input_path": "data/spy_market_data.csv",
   "output_dir": "data/baselines/rl_only_baseline",
   "ticker": "SPY",
-  "train_timesteps": 500000,
+  "train_timesteps": 200000,
   "initial_amount": 10000.0,
   "transaction_cost_pct": 0.001,
   "reward_window_k": 3,

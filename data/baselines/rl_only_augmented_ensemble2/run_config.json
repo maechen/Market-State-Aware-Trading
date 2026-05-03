@@ -7,7 +7,7 @@
   "transaction_cost_pct": 0.001,
   "reward_window_k": 3,
   "n_seeds": 5,
-  "base_seed": 67,
+  "base_seed": 100,
   "augmentation_modes": [
     "none",
     "shift",
