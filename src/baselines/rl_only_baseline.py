@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -105,6 +106,7 @@ class RLBaselineConfig:
     # k-day lookahead window for precomputed training reward (Eq. 5-7 in paper).
     reward_window_k: int = 3
     seed: int = 42
+    progress_interval_steps: int = 25_000
 
     # TDQN hyperparameters (DQN + Huber loss; SB3 uses SmoothL1Loss by default).
     dqn_learning_rate: float = 1e-4
@@ -488,13 +490,64 @@ def train_fold_tdqn(
         norm_coeffs=norm_coeffs,
     )
 
-    class _CounterfactualCallback(BaseCallback):
+    class _CounterfactualProgressCallback(BaseCallback):
         """
         After each env step, push counterfactual transitions for the two
         non-taken actions into the replay buffer (Theate & Ernst, 2020).
         Both the actual and counterfactual outcomes are observable from the
         same pre-step state, doubling the useful signal per env interaction.
+
+        Also prints periodic progress so long SB3 learn() calls do not look
+        stalled while they are still doing useful work.
         """
+
+        def __init__(self, total_timesteps: int, interval_steps: int) -> None:
+            super().__init__()
+            self.total_timesteps = int(total_timesteps)
+            self.interval_steps = max(0, int(interval_steps))
+            self._start_time = 0.0
+            self._last_report_timestep = 0
+
+        @staticmethod
+        def _format_seconds(seconds: float) -> str:
+            seconds = max(0.0, float(seconds))
+            hours, rem = divmod(int(seconds), 3600)
+            minutes, secs = divmod(rem, 60)
+            if hours:
+                return f"{hours}h {minutes:02d}m {secs:02d}s"
+            return f"{minutes}m {secs:02d}s"
+
+        def _on_training_start(self) -> None:
+            self._start_time = time.perf_counter()
+            self._last_report_timestep = 0
+            print(
+                f"  TDQN learn start: {self.total_timesteps:,} timesteps "
+                f"(progress every {self.interval_steps:,} steps)",
+                flush=True,
+            )
+
+        def _maybe_report_progress(self) -> None:
+            if self.interval_steps <= 0:
+                return
+            current = int(self.num_timesteps)
+            is_done = current >= self.total_timesteps
+            if not is_done and current - self._last_report_timestep < self.interval_steps:
+                return
+
+            elapsed = time.perf_counter() - self._start_time
+            steps_per_sec = current / elapsed if elapsed > 0.0 else 0.0
+            remaining_steps = max(0, self.total_timesteps - current)
+            eta = remaining_steps / steps_per_sec if steps_per_sec > 0.0 else 0.0
+            pct = min(100.0, 100.0 * current / max(1, self.total_timesteps))
+            print(
+                "  TDQN progress: "
+                f"{current:,}/{self.total_timesteps:,} ({pct:5.1f}%) | "
+                f"{steps_per_sec:,.1f} steps/s | "
+                f"elapsed {self._format_seconds(elapsed)} | "
+                f"eta {self._format_seconds(eta)}",
+                flush=True,
+            )
+            self._last_report_timestep = current
 
         def _on_step(self) -> bool:
             infos = self.locals.get("infos", [{}])
@@ -502,6 +555,7 @@ def train_fold_tdqn(
             new_obs = self.locals.get("new_obs")
             dones = self.locals.get("dones")
             if new_obs is None or dones is None:
+                self._maybe_report_progress()
                 return True
             last_obs = self.model._last_obs  # pre-step; updated after _on_step
             for i, info in enumerate(infos):
@@ -520,6 +574,7 @@ def train_fold_tdqn(
                         np.array([bool(dones[i])]),
                         [{}],
                     )
+            self._maybe_report_progress()
             return True
 
     policy_kwargs = dict(
@@ -548,7 +603,10 @@ def train_fold_tdqn(
     model.learn(
         total_timesteps=config.train_timesteps,
         progress_bar=False,
-        callback=_CounterfactualCallback(),
+        callback=_CounterfactualProgressCallback(
+            total_timesteps=config.train_timesteps,
+            interval_steps=config.progress_interval_steps,
+        ),
     )
     return model, norm_coeffs
 
