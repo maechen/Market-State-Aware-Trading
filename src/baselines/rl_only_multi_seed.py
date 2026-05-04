@@ -667,7 +667,7 @@ def parse_args() -> argparse.Namespace:
         help="Root for per-seed runs and averaged outputs.",
     )
     parser.add_argument("--ticker", type=str, default="SPY")
-    parser.add_argument("--train-timesteps", type=int, default=200_000)
+    parser.add_argument("--train-timesteps", type=int, default=500_000)
     parser.add_argument("--initial-amount", type=float, default=10_000.0)
     parser.add_argument("--transaction-cost-pct", type=float, default=1e-3)
     parser.add_argument("--reward-window-k", type=int, default=3)

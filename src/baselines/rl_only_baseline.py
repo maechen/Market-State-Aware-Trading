@@ -466,7 +466,7 @@ def _load_tdqn_dependencies():
 
 
 def train_fold_tdqn(
-    train_df: pd.DataFrame, config: RLBaselineConfig
+    train_df: pd.DataFrame, config: RLBaselineConfig, val_df: pd.DataFrame | None = None
 ) -> tuple:
     """
     Train one TDQN model on one fold's training split.
@@ -501,12 +501,15 @@ def train_fold_tdqn(
         stalled while they are still doing useful work.
         """
 
-        def __init__(self, total_timesteps: int, interval_steps: int) -> None:
+        def __init__(self, total_timesteps: int, interval_steps: int, val_df=None, norm_coeffs=None, config=None) -> None:
             super().__init__()
             self.total_timesteps = int(total_timesteps)
             self.interval_steps = max(0, int(interval_steps))
             self._start_time = 0.0
             self._last_report_timestep = 0
+            self._val_df = val_df
+            self._val_norm_coeffs = norm_coeffs
+            self._val_config = config
 
         @staticmethod
         def _format_seconds(seconds: float) -> str:
@@ -548,6 +551,23 @@ def train_fold_tdqn(
                 flush=True,
             )
             self._last_report_timestep = current
+
+            if self._val_df is not None and self._val_config is not None:
+                try:
+                    val_account_df, _, _ = evaluate_tdqn_on_split(
+                        model=self.model,
+                        split_df=self._val_df,
+                        config=self._val_config,
+                        norm_coeffs=self._val_norm_coeffs,
+                    )
+                    val_metrics = compute_performance_metrics(val_account_df)
+                    print(
+                        f"  Val: total_return={val_metrics['total_return']:.4f} "
+                        f"sharpe={val_metrics['sharpe_ratio']:.4f}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(f"  [WARN] Val eval failed: {exc}", flush=True)
 
         def _on_step(self) -> bool:
             infos = self.locals.get("infos", [{}])
@@ -606,6 +626,9 @@ def train_fold_tdqn(
         callback=_CounterfactualProgressCallback(
             total_timesteps=config.train_timesteps,
             interval_steps=config.progress_interval_steps,
+            val_df=val_df,
+            norm_coeffs=norm_coeffs,
+            config=config,
         ),
     )
     return model, norm_coeffs
@@ -1104,7 +1127,7 @@ def run_walkforward_rl_only_baseline(
         val_df = prepare_env_dataframe(val_raw)
         test_df = prepare_env_dataframe(test_raw)
 
-        model, norm_coeffs = train_fold_tdqn(train_df=train_df, config=config)
+        model, norm_coeffs = train_fold_tdqn(train_df=train_df, config=config, val_df=val_df)
 
         fold_dir = output_root / fold["name"]
         fold_dir.mkdir(parents=True, exist_ok=True)

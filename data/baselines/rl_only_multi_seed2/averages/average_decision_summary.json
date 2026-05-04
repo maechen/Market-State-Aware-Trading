@@ -1,0 +1,24 @@
+{
+  "selected_strategy": "rl_only_stitched",
+  "selection_rule": "only averaged RL-only stitched strategy",
+  "seeds_used": [
+    42,
+    52,
+    63,
+    69,
+    81
+  ],
+  "selected_metrics": {
+    "strategy": "rl_only_stitched",
+    "total_return": 0.4277761593815792,
+    "annualized_return": 0.0490797804260108,
+    "annualized_volatility": 0.14267247982680947,
+    "sharpe_ratio": 0.34400313561234014,
+    "sortino_ratio": 0.4199673494865195,
+    "calmar_ratio": 0.21570205920790525,
+    "max_drawdown": -0.22753505741317503,
+    "turnover": 180.1195206398698,
+    "annualized_turnover": 24.233913081285202,
+    "average_holding_time_days": 38.78048780487805
+  }
+}
